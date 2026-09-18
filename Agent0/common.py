@@ -1,0 +1,437 @@
+"""Agent0's self-consistency reward, curation filter, and ADPO.
+
+Traced from the real code in `aiming-lab/Agent0`, not from the paper:
+
+  Step 3 reward      curriculum_train/examples/reward_function/curriculum_reward.py
+  Step 3 grading     curriculum_train/vllm_service_init/start_vllm_server_tool.py
+  Step 4 vote        curriculum_train/question_evaluate/evaluate.py
+  Step 4 filter      curriculum_train/question_evaluate/upload.py
+  Step 5 reward      executor_train/verl_tool/workers/reward_manager/reward_score/torl_math.py
+  Step 5 algorithm   executor_train/verl_tool/trainer/ppo/core_algos.py
+
+vLLM sampling, the SandboxFusion code service, and ``mathruler``'s sympy grader
+are represented here by caller-supplied callbacks or by already-sampled values.
+Everything through ``difficulty_filter`` is plain Python, exactly as it is
+upstream; only ADPO needs torch.
+"""
+
+import re
+from collections import Counter
+from math import exp, log
+
+import torch
+
+# ---------------------------------------------------------------- extraction
+
+
+def extract_boxed(text):
+    """Return the contents of the last ``\\boxed{...}``, or ``""``.
+
+    Braces are walked rather than matched with a regex because the payload
+    nests: ``\\boxed{\\frac{1}{2}}`` closes at its fourth ``}``, not its first.
+    ``mathruler.extract_boxed_content`` scans the same way, and ``torl_math``'s
+    ``boxed_pattern`` only tolerates nesting at all by spelling three levels of
+    it out by hand.
+    """
+    marker = "\\boxed{"
+    start = text.rfind(marker)
+    if start == -1:
+        return ""
+    depth = 0
+    for position in range(start + len(marker) - 1, len(text)):
+        if text[position] == "{":
+            depth += 1
+        elif text[position] == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start + len(marker):position]
+    return ""
+
+
+def extract_question(text):
+    """Return the last ``<question>...</question>`` body, or ``""``.
+
+    ``compute_score`` takes the last match and pairs it with the last boxed
+    answer; a generation missing either one is the malformed case that
+    :func:`curriculum_reward` scores ``-1``.
+    """
+    questions = re.findall(r"<question>(.*?)</question>", text, re.DOTALL)
+    return questions[-1].strip() if questions else ""
+
+
+def default_equivalent(first, second):
+    """Stand in for ``mathruler.grade_answer``: are two answers the same?
+
+    The real grader normalizes LaTeX and then asks sympy whether the difference
+    simplifies to zero, which is what lets ``"1/2"``, ``"0.5"`` and
+    ``"\\frac{1}{2}"`` land in one bucket. This keeps the same contract on a
+    small set of cases so the exercises stay dependency-free. Every function
+    below takes ``equivalent`` as an argument, so the real grader drops in.
+    """
+    if not first or not second:
+        return False
+    left, right = _normalize(first), _normalize(second)
+    if left == right:
+        return True
+    try:
+        return abs(_to_number(left) - _to_number(right)) < 1e-6
+    except ValueError:
+        return False
+
+
+def _normalize(answer):
+    answer = answer.strip().lower()
+    answer = answer.replace("\\left", "").replace("\\right", "")
+    answer = answer.replace("$", "").replace(" ", "").replace(",", "")
+    return answer.rstrip(".")
+
+
+def _to_number(answer):
+    """Parse a plain number, a ``a/b``, or a ``\\frac{a}{b}``."""
+    fraction = re.fullmatch(r"\\frac\{(-?[\d.]+)\}\{(-?[\d.]+)\}", answer)
+    if fraction:
+        return float(fraction.group(1)) / float(fraction.group(2))
+    ratio = re.fullmatch(r"(-?[\d.]+)/(-?[\d.]+)", answer)
+    if ratio:
+        return float(ratio.group(1)) / float(ratio.group(2))
+    return float(answer)
+
+
+# ------------------------------------------------------------ self-consistency
+
+
+def cluster_answers(answers, equivalent=default_equivalent):
+    """Group answers into equivalence classes, in first-seen order.
+
+    This is ``consolidate_and_grade``'s grouping loop. Three details are load
+    bearing:
+
+    * Empty extractions are skipped, never bucketed. They still count against
+      Step 3's denominator -- see :func:`self_consistency_score`.
+    * A literal ``==`` (and the ``'no '`` in both strings shortcut) is tried
+      before ``equivalent``, because the real ``grade_answer`` calls sympy and
+      is slow enough upstream to need a 20-second timeout.
+    * ``equivalent`` is tried in *both* directions. It is not symmetric: the
+      grader normalizes its two arguments differently, so ``f(a, b)`` can be
+      false while ``f(b, a)`` is true.
+
+    First match wins; a candidate matching no existing bucket opens its own.
+    """
+    counts = {}
+    for answer in answers:
+        if not answer:
+            continue
+        matched = False
+        for existing in list(counts):
+            cheap = answer == existing or ("no " in answer.lower() and "no " in existing.lower())
+            if cheap or equivalent(answer, existing) or equivalent(existing, answer):
+                counts[existing] += 1
+                matched = True
+                break
+        if not matched:
+            counts[answer] = 1
+    return counts
+
+
+def self_consistency_score(answers, equivalent=default_equivalent,
+                           denominator="candidates"):
+    """Return ``(majority_answer, agreement_fraction)`` over sampled answers.
+
+    ``answers`` are already-extracted strings; ``""`` means that candidate
+    produced no parseable ``\\boxed{}``.
+
+    The two call sites upstream disagree about the denominator, so it is an
+    argument here rather than a constant:
+
+    ``"candidates"``
+        Step 3. ``consolidate_and_grade`` divides by ``len(assistant_messages)``
+        -- every candidate the Executor was asked for, including the ones that
+        answered with nothing. Failing to produce an answer counts as
+        disagreement, which is what you want when grading how hard a question is.
+
+    ``"valid"``
+        Step 4. ``evaluate.py`` filters ``results`` down to non-empty
+        extractions first and divides by what is left. A question the Executor
+        usually fails to even answer can still score 1.0 here, on the strength
+        of the two attempts that produced anything.
+
+    Same phrase, same repo, two different numbers. The Step 4 value is the one
+    that survives into ``train.parquet`` and becomes ADPO's difficulty label.
+    """
+    if denominator not in ("candidates", "valid"):
+        raise ValueError("denominator must be 'candidates' or 'valid'")
+    counts = cluster_answers(answers, equivalent)
+    if not counts:
+        return "", 0.0
+    majority = max(counts, key=counts.get)
+    total = len(answers) if denominator == "candidates" else sum(
+        1 for answer in answers if answer)
+    return majority, counts[majority] / total
+
+
+def gate_against_claim(majority, claimed, score, equivalent=default_equivalent,
+                       floor=0.1):
+    """Return ``score`` if the Executor's consensus backs the proposer's claim.
+
+    The Curriculum Agent publishes its own ``\\boxed{}`` answer alongside each
+    question it writes. Nobody verifies that claim -- but the Executor's
+    majority has to land on it, or the whole question scores zero no matter how
+    consistent that majority was. Without this gate the proposer could farm
+    reward by writing questions the Executor confidently gets wrong.
+
+    ``floor`` is upstream's ``score > 0.1``, and is strictly greater on
+    purpose. With the 10 candidates Step 3 samples, ten distinct answers give
+    every bucket a count of 1 and an arbitrary "majority" at exactly ``0.1``.
+    That is total incoherence, not a 10% consensus, so it is excluded.
+    """
+    if score > floor and equivalent(majority, claimed):
+        return score
+    return 0.0
+
+
+# -------------------------------------------------------------- reward shaping
+
+
+def tool_reward(predict, weight=0.05, cap=4):
+    """Reward Python calls by the count, up to a cap.
+
+    ``calculate_tool_reward`` counts occurrences of the ```` ```output ````
+    fence -- one per sandbox round-trip the Executor completed -- and pays
+    ``weight`` each up to ``cap``. It is worth up to 0.20, not the flat 0.05
+    bonus the shape is usually described as, and a capped count rather than a
+    flag so that using the tool twice beats using it once without paying for
+    an unbounded loop of trivial calls.
+    """
+    if not predict:
+        return 0.0
+    return min(predict.count("```output"), cap) * weight
+
+
+def curriculum_reward(score, has_question, cluster_share, predict):
+    """Assemble Step 3's reward for one generated question.
+
+        (min(score, 1 - score) if has_question else -1.0)
+            - cluster_share
+            + tool_reward(predict)
+
+    ``min(score, 1 - score)`` is a tent peaking at 0.5: a question the Executor
+    solves every time scores 0, and so does one it never solves. Only genuine
+    50/50 difficulty pays.
+
+    ``has_question`` false means nothing parsed out of the generation, and the
+    base drops to ``-1.0`` -- strictly worse than a perfectly solved question's
+    0.0. Malformed output is punished, not merely ignored.
+
+    ``cluster_share`` is subtracted raw, and is a fraction rather than a flag:
+    see :func:`bleu_cluster_share`.
+    """
+    base = min(score, 1.0 - score) if has_question else -1.0
+    return base - cluster_share + tool_reward(predict)
+
+
+def bleu_cluster_share(questions, distance_threshold=0.5):
+    """Return each question's share of the batch that looks like it.
+
+    ``cluster_share_per_problem`` builds a ``1 - sentence_bleu`` distance matrix
+    over the batch, runs average-linkage agglomerative clustering at
+    ``distance_threshold``, and hands back ``cluster_size / batch_size`` per
+    row. :func:`curriculum_reward` subtracts that number directly.
+
+    So the diversity penalty is continuous, not the fixed ``0.3 if duplicate``
+    it is usually summarized as. One question in a cluster of 40 out of 100
+    loses 0.40 -- more than the entire 0.5 maximum of the tent reward. A
+    question with no near-duplicates still loses ``1/n``, its own share. The
+    pressure is on the batch's variety as a whole, not on exact repeats.
+
+    Upstream uses nltk and scikit-learn; the BLEU and merge loops below are
+    written out so this module stays dependency-free.
+    """
+    if not questions:
+        return []
+    size = len(questions)
+    tokens = [question.split() for question in questions]
+    distance = [[0.0] * size for _ in range(size)]
+    for i in range(size):
+        for j in range(i + 1, size):
+            value = 1.0 - _sentence_bleu(tokens[j], tokens[i])
+            distance[i][j] = distance[j][i] = value
+
+    clusters = _average_linkage(distance, distance_threshold)
+    label_of = {}
+    for label, members in enumerate(clusters):
+        for member in members:
+            label_of[member] = label
+    sizes = Counter(label_of.values())
+    return [sizes[label_of[i]] / size for i in range(size)]
+
+
+def _sentence_bleu(reference, hypothesis, max_n=4):
+    """BLEU-4 with nltk's ``SmoothingFunction().method1`` add-epsilon smoothing."""
+    if not hypothesis:
+        return 0.0
+    log_precisions = []
+    for n in range(1, max_n + 1):
+        hypothesis_ngrams = Counter(_ngrams(hypothesis, n))
+        reference_ngrams = Counter(_ngrams(reference, n))
+        total = sum(hypothesis_ngrams.values())
+        if total == 0:
+            # method1 leaves a precision with no denominator out entirely.
+            continue
+        overlap = sum(min(count, reference_ngrams[gram])
+                      for gram, count in hypothesis_ngrams.items())
+        # method1: a zero numerator becomes epsilon rather than collapsing BLEU.
+        precision = (overlap / total) if overlap else (1e-9 / total)
+        log_precisions.append(log(precision))
+    if not log_precisions:
+        return 0.0
+    score = exp(sum(log_precisions) / max_n)
+    if len(hypothesis) < len(reference):
+        score *= exp(1.0 - len(reference) / len(hypothesis))
+    return score
+
+
+def _ngrams(tokens, n):
+    return [tuple(tokens[i:i + n]) for i in range(len(tokens) - n + 1)]
+
+
+def _average_linkage(distance, threshold):
+    """Merge clusters while the closest pair's mean distance is below threshold."""
+    clusters = [[i] for i in range(len(distance))]
+    while len(clusters) > 1:
+        best, best_pair = None, None
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                mean = sum(distance[a][b] for a in clusters[i] for b in clusters[j])
+                mean /= len(clusters[i]) * len(clusters[j])
+                if best is None or mean < best:
+                    best, best_pair = mean, (i, j)
+        if best is None or best >= threshold:
+            break
+        i, j = best_pair
+        clusters[i] = clusters[i] + clusters[j]
+        clusters.pop(j)
+    return clusters
+
+
+# ------------------------------------------------------------------ curation
+
+
+def difficulty_filter(rows, min_score=0.3, max_score=0.8):
+    """Keep rows whose Step 4 score falls inside an inclusive band.
+
+    ``upload.py``'s whole curation rule: a non-empty answer and
+    ``min_score <= score <= max_score``. A flat keep/discard box, not a shaped
+    preference -- 0.5 gets no bonus for sitting in the middle. Everything kept
+    carries its ``score`` forward as ADPO's difficulty label.
+
+    The defaults here are ``[0.3, 0.8]``, which is what the README's documented
+    invocation passes. ``upload.py``'s own argparse default for ``--max_score``
+    is ``0.7``; run the script bare and you train on a narrower band than the
+    reproduction instructions describe.
+    """
+    return [row for row in rows
+            if row.get("answer") and min_score <= row.get("score", 0) <= max_score]
+
+
+# -------------------------------------------------- Step 5: Executor and ADPO
+
+
+def correctness_score(response, ground_truth, equivalent=default_equivalent):
+    """Return ``+1.0`` for a correct final answer, ``-1.0`` otherwise.
+
+    ``correctness_score_default``: pull the last ``\\boxed{}``, compare against
+    the pseudo-label Step 4 attached, and pay ``+1``/``-1``. A response with no
+    boxed answer scores ``-1`` -- the same as being wrong, no separate format
+    penalty. That is the entire Executor reward; all of ADPO's difficulty
+    awareness lives in the algorithm below, not here.
+    """
+    answer = extract_boxed(response)
+    if not answer:
+        return -1.0
+    return 1.0 if equivalent(answer, ground_truth) else -1.0
+
+
+def adpo_trust_scale(score, min_score=0.3, max_score=0.8, min_advantage_scale=0.5):
+    """Map a difficulty label to the factor ADPO shrinks its advantage by.
+
+    ``trust = clamp((score - min) / (max - min), 0, 1)`` runs 0 at the hardest
+    kept question to 1 at the easiest, and the returned scale interpolates from
+    ``min_advantage_scale`` up to 1.0. A hard question teaches a half-strength
+    lesson because its reward is the one least likely to be right.
+    """
+    score = torch.as_tensor(score, dtype=torch.float32)
+    trust = ((score - min_score) / (max_score - min_score)).clamp(0.0, 1.0)
+    return min_advantage_scale + trust * (1.0 - min_advantage_scale)
+
+
+def adpo_advantage(rewards, group_index, score, epsilon=1e-6,
+                   norm_adv_by_std_in_grpo=True, min_score=0.3, max_score=0.8,
+                   min_advantage_scale=0.5):
+    """Return GRPO's group-relative advantage, scaled by per-sample trust.
+
+    ``compute_adpo_outcome_advantage`` is ``compute_grpo_outcome_advantage``
+    line for line -- same grouping by uid, same singleton mean-0/std-1 special
+    case, same ``1e-6`` -- with one extra multiply at the end. Compare against
+    ``GRPO/common.py``'s ``group_relative_advantage``: the diff is ADPO's twist
+    and nothing else.
+
+    ``norm_adv_by_std_in_grpo=False`` drops the std divide, which is exactly
+    what Dr.GRPO's one-flag change does.
+    """
+    rewards = torch.as_tensor(rewards, dtype=torch.float32)
+    group_index = torch.as_tensor(group_index, device=rewards.device)
+    scale = adpo_trust_scale(score, min_score, max_score, min_advantage_scale)
+    advantages = torch.empty_like(rewards)
+    for group in torch.unique(group_index):
+        here = group_index == group
+        group_rewards = rewards[here]
+        if group_rewards.numel() == 1:
+            mean, std = torch.zeros(()), torch.ones(())
+        else:
+            mean, std = group_rewards.mean(), group_rewards.std(unbiased=True)
+        if norm_adv_by_std_in_grpo:
+            advantages[here] = (group_rewards - mean) / (std + epsilon)
+        else:
+            advantages[here] = group_rewards - mean
+    return advantages * scale
+
+
+def adpo_clip_high(score, base_epsilon=0.2, max_epsilon_bonus=0.1,
+                   min_score=0.3, max_score=0.8):
+    """Return the per-sample upper clip width, widened on harder questions.
+
+    The mirror image of the trust weight: ``exploration`` is 1 at the hardest
+    kept question and 0 at the easiest, so the high bound runs from
+    ``base_epsilon + max_epsilon_bonus`` down to ``base_epsilon``. The lower
+    bound never moves. On a hard question the policy gets more room to raise a
+    good-but-unlikely response's probability, because "correct" there does not
+    yet mean the approach generalizes.
+
+    DAPO's clip-higher is the same idea with a constant instead of a dial.
+    """
+    score = torch.as_tensor(score, dtype=torch.float32)
+    exploration = ((max_score - score) / (max_score - min_score)).clamp(0.0, 1.0)
+    return base_epsilon + exploration * max_epsilon_bonus
+
+
+def adpo_policy_loss(old_logp, logp, advantage, mask, score, base_epsilon=0.2,
+                     max_epsilon_bonus=0.1, min_score=0.3, max_score=0.8):
+    """PPO's clipped loss with a per-sample asymmetric clip range.
+
+    Log probabilities and ``mask`` are ``(N,T)``; ``advantage`` and ``score``
+    are ``(N,)``. Identical to the clipped surrogate in ``GRPO/common.py``
+    except that the upper bound is a column vector from :func:`adpo_clip_high`
+    rather than one shared scalar.
+    """
+    advantage = torch.as_tensor(advantage, dtype=torch.float32)
+    if advantage.ndim == 1:
+        advantage = advantage.unsqueeze(-1)
+    ratio = torch.exp(logp - old_logp)
+    high = 1.0 + adpo_clip_high(score, base_epsilon, max_epsilon_bonus,
+                                min_score, max_score).unsqueeze(-1)
+    # Two steps because the lower bound is a scalar and the upper is per-sample;
+    # torch.clamp will not mix the two.
+    clipped = torch.minimum(ratio.clamp_min(1.0 - base_epsilon), high)
+    per_token_loss = torch.maximum(-advantage * ratio, -advantage * clipped)
+    mask = mask.to(per_token_loss.dtype)
+    return (per_token_loss * mask).sum() / mask.sum().clamp_min(1)
