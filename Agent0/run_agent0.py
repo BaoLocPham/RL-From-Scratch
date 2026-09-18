@@ -35,8 +35,8 @@ def _load(name, path):
 
 # The Curriculum Agent is trained with plain GRPO, so reuse that module as is.
 grpo = _load("grpo_common", ROOT.parent / "GRPO" / "common.py")
-group_relative_advantage = grpo.group_relative_advantage
-clipped_surrogate_loss = grpo.clipped_surrogate_loss
+compute_grpo_outcome_advantage = grpo.compute_grpo_outcome_advantage
+compute_policy_loss = grpo.compute_policy_loss
 
 torch.manual_seed(0)
 
@@ -108,11 +108,17 @@ for step in range(60):
             rewards.append(curriculum_reward(gated, True, shares[i], text))
         rewards = torch.tensor(rewards)
         groups = torch.arange(slots).repeat_interleave(GROUP_SIZE)
-        advantage = group_relative_advantage(rewards, groups)
+        # verl shapes: the scalar reward goes in a (N, 1) token-level row, and
+        # the advantage comes back shaped the same way.
+        token_level_rewards = rewards.unsqueeze(-1)
+        advantage, _ = compute_grpo_outcome_advantage(
+            token_level_rewards, torch.ones_like(token_level_rewards),
+            groups.numpy())
         old_logp = old_logits.log_softmax(-1)[flat].unsqueeze(-1)
 
     logp = logits.log_softmax(-1)[flat].unsqueeze(-1)
-    loss = clipped_surrogate_loss(old_logp, logp, advantage, torch.ones_like(logp))
+    loss = compute_policy_loss(old_logp, logp, advantage, torch.ones_like(logp),
+                               cliprange=0.2)[0]
     optimizer.zero_grad()
     loss.backward()
     optimizer.step()
@@ -173,14 +179,17 @@ for step in range(25):
         responses = [["\\boxed{17}", "\\boxed{42}", "\\boxed{8}"][p]
                      for p in picks.reshape(-1).tolist()]
         rewards = torch.tensor([correctness_score(r, "42") for r in responses])
-        flat_groups = groups.repeat_interleave(4)
+        token_level_rewards = rewards.unsqueeze(-1)              # (N, 1)
+        response_mask = torch.ones_like(token_level_rewards)
+        flat_index = [f"q{i}" for i in groups.repeat_interleave(4).tolist()]
         flat_scores = scores.repeat_interleave(4)
-        advantage = adpo_advantage(rewards, flat_groups, flat_scores)
+        advantage, _ = adpo_advantage(token_level_rewards, response_mask,
+                                      flat_index, flat_scores)
         old_logp = old_logits.log_softmax(-1).gather(1, picks).reshape(-1, 1)
 
     logp = executor_logits.log_softmax(-1).gather(1, picks).reshape(-1, 1)
     loss = adpo_policy_loss(old_logp, logp, advantage, torch.ones_like(logp),
-                            flat_scores)
+                            flat_scores)[0]
     executor_optimizer.zero_grad()
     loss.backward()
     executor_optimizer.step()

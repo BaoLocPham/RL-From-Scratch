@@ -1,31 +1,59 @@
-# Build PPO from scratch
+# Build verl's PPO from scratch
 
-Do not open `../common.py` first. Work from the shapes, the papers, and the
-grader outputs; otherwise this becomes transcription rather than reconstruction.
+Do not open `../common.py` first. Work from the docstrings in `ppo.py` and the
+grader's messages; reading the reference turns this into transcription.
 
-| Stage | Function | Core idea |
+Names, argument orders and return tuples match
+[`verl/trainer/ppo/core_algos.py`](https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py)
+and `verl/utils/torch_functional.py`, so what you write here drops into a real
+verl trainer unchanged.
+
+| Stage | Functions | Question it answers |
 |---|---|---|
-| 1 | `discounted_returns` | Reward-to-go stops at episode boundaries |
-| 2 | `generalized_advantage_estimate` | Bias/variance-controlled temporal credit |
-| 3 | `normalize_advantage` | Statistics ignore padded positions |
-| 4 | `clipped_policy_loss` | Bound the incentive from a changed policy ratio |
-| 5 | `clipped_value_loss` | Bound one critic regression update |
-| 6 | `categorical_entropy`, `ppo_loss` | Preserve exploration and compose the objective |
+| 1 | `masked_mean`, `masked_var`, `masked_whiten` | Why must padding never reach a statistic? |
+| 2 | `compute_gae_advantage_return` | Why is `response_mask` not a `dones` flag? |
+| 3 | `agg_loss` | Why does the aggregation mode change what the model learns? |
+| 4 | `compute_policy_loss` | Why does PPO need a *second* clip? |
+| 5 | `clip_by_value`, `compute_value_loss` | Why clip the critic around its own last prediction? |
+| 6 | `entropy_from_logits`, `compute_entropy_loss` | Why is entropy subtracted from a minimized loss? |
+| 7 | `kl_penalty`, `compute_rewards` | Why four KL estimators, and why does PPO put its KL in the reward? |
 
-Run `python PPO/from_scratch/check.py` from the repository root. The policy and
-value clipping objective follows equations (7-9) in
-[Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347).
-Stage 2 follows equations (11-12) in
-[High-Dimensional Continuous Control Using Generalized Advantage Estimation](https://arxiv.org/abs/1506.02438).
+Run `python PPO/from_scratch/check.py` from the repository root. The grader
+stops at the first incomplete stage. `GRPO/from_scratch/grpo.py` imports your
+`agg_loss`, `compute_policy_loss` and `kl_penalty`, so finish this one first.
 
-A production RLHF PPO pipeline also penalizes drift from a frozen SFT reference.
-In TRL v0.21.0 that k1/k3 KL penalty is folded into the reward *before* GAE,
-rather than added to the final `ppo_loss`; see
-[`ppo_trainer.py` lines 511-513](https://github.com/huggingface/trl/blob/46d09bd2408f17605409fb3ee8ba12705add7faa/trl/trainer/ppo_trainer.py#L511-L513).
-It is not implemented here because this compact module otherwise needs no
-second frozen model.
+## Two conventions, and most mistakes are really about one of them
 
-At the end, you should be able to explain why terminal masks affect both
-bootstrapping and recursive credit, why the policy clip changes behavior with
-the sign of the advantage, why PPO retains the worse value error, and why
-entropy is subtracted from a minimized loss.
+**Every tensor is `(batch, response_length)`.** No sequence dimension, no
+per-sequence scalar. A single outcome reward for a whole response is a row that
+is zero everywhere except its last valid position; a single advantage is a row
+repeated across the response.
+
+**`response_mask` is the only thing that makes a position real.** It is the EOS
+mask. Every mean, sum, variance and loss is taken over it.
+
+## References
+
+Clipping follows equations (7)-(9) of
+[Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347);
+stage 2 follows equations (11)-(12) of
+[High-Dimensional Continuous Control Using GAE](https://arxiv.org/abs/1506.02438).
+The dual clip in stage 4 is from
+[Mastering Complex Control in MOBA Games](https://arxiv.org/pdf/1912.09729).
+Stage 3's `seq-mean-token-sum-norm` is
+[Dr.GRPO](https://arxiv.org/abs/2503.20783)'s constant divisor, and stage 7's
+`k3` is from [Approximating KL Divergence](http://joschu.net/blog/kl-approx.html).
+
+## At the end, you should be able to answer
+
+- In GAE, why does a masked-out position *carry* `nextvalues` and `lastgaelam`
+  through rather than resetting them? What breaks if you reset them?
+- Why is `returns` computed before the advantage is whitened?
+- The policy clip behaves differently depending on the sign of the advantage.
+  Why, and what does the dual clip add that the ordinary clip cannot?
+- Under `token-mean`, does a 500-token response influence the update more than a
+  50-token one? Should it? Which mode would you pick to make length irrelevant?
+- Why must a single-sample KL estimator be non-negative? If `k1` comes out
+  negative on one token, what has actually gone wrong — and has anything?
+- PPO subtracts its KL from the reward; GRPO adds its KL to the loss. Name one
+  concrete consequence of that difference.

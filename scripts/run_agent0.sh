@@ -1,11 +1,14 @@
 #!/usr/bin/env bash
 #
-# Run the Agent0 module.  ./scripts/run_agent0.sh <command>
+# Run one module.  ./scripts/run_agent0.sh <command>
 #
-#   check     grade from_scratch/agent0.py, stopping at the first unfinished stage
+# Sibling links scripts/run_ppo.sh and scripts/run_grpo.sh drive PPO and GRPO;
+# the module is taken from this script's own filename.
+#
+#   check     grade the module's from_scratch exercise, stopping at the first gap
 #   steps     the walkthrough, against the reference implementation
 #   scratch   the walkthrough, against your from_scratch implementation
-#   run       one full iteration: Steps 3, 4 and 5 end to end
+#   run       the runnable demonstration
 #   diff      prove your implementation matches: check, then steps vs scratch
 #   all       check, steps, run
 #
@@ -16,6 +19,15 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
+# run_agent0.sh -> Agent0, run_ppo.sh -> PPO, run_grpo.sh -> GRPO
+STEM="$(basename "${BASH_SOURCE[0]}" .sh)"; STEM="${STEM#run_}"
+case "$STEM" in
+    agent0) MODULE=Agent0 ;;
+    ppo)    MODULE=PPO ;;
+    grpo)   MODULE=GRPO ;;
+    *)      echo "unknown module: $STEM" >&2; exit 1 ;;
+esac
+
 PYTHON="${PYTHON:-$(command -v python3 || command -v python)}"
 if [ -z "$PYTHON" ]; then
     echo "no python on PATH; set PYTHON=/path/to/python" >&2
@@ -23,7 +35,7 @@ if [ -z "$PYTHON" ]; then
 fi
 
 usage() {
-    sed -n '3,12p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 banner() {
@@ -31,23 +43,23 @@ banner() {
 }
 
 cmd_check() {
-    banner "grading Agent0/from_scratch/agent0.py"
-    "$PYTHON" Agent0/from_scratch/check.py
+    banner "grading $MODULE/from_scratch/$STEM.py"
+    "$PYTHON" "$MODULE/from_scratch/check.py"
 }
 
 cmd_steps() {
     banner "walkthrough (reference implementation)"
-    "$PYTHON" Agent0/steps_agent0.py
+    "$PYTHON" "$MODULE/steps_$STEM.py"
 }
 
 cmd_scratch() {
     banner "walkthrough (your implementation)"
-    RL_IMPL=scratch "$PYTHON" Agent0/steps_agent0.py
+    RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py"
 }
 
 cmd_run() {
-    banner "one Agent0 iteration: Steps 3, 4 and 5"
-    "$PYTHON" Agent0/run_agent0.py
+    banner "$MODULE demo"
+    "$PYTHON" "$MODULE/run_$STEM.py"
 }
 
 cmd_diff() {
@@ -57,8 +69,8 @@ cmd_diff() {
     reference="$(mktemp)"
     mine="$(mktemp)"
     trap 'rm -f "$reference" "$mine"' RETURN
-    "$PYTHON" Agent0/steps_agent0.py > "$reference"
-    RL_IMPL=scratch "$PYTHON" Agent0/steps_agent0.py > "$mine"
+    "$PYTHON" "$MODULE/steps_$STEM.py" > "$reference"
+    RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py" > "$mine"
     if diff -u "$reference" "$mine"; then
         echo "identical -- your implementation is indistinguishable from common.py"
     else

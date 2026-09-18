@@ -3,7 +3,7 @@
 Do not open `../common.py` first. Work from the docstrings in `agent0.py` and
 from the grader's messages; reading the reference turns this into transcription.
 
-This exercise is scaffolded more heavily than the PPO, DPO and GRPO ones. The
+This exercise is scaffolded more heavily than the PPO and GRPO ones. The
 control flow, the loops and the variable names are already written — the TODOs
 sit on individual expressions. The bookkeeping around an idea is not the idea,
 and here only the idea is left blank.
@@ -31,7 +31,7 @@ GRPO, which you have already built one directory over.
 
 ADPO is in `../common.py` as reference only, along with the `[0.3, 0.8]` band
 filter and the Executor's `+1`/`-1` reward. Read
-`adpo_advantage` next to `GRPO/common.py`'s `group_relative_advantage`: they
+`adpo_advantage` next to `GRPO/common.py`'s `compute_grpo_outcome_advantage`: they
 are the same function plus one multiply, and that multiply is the paper's
 contribution.
 

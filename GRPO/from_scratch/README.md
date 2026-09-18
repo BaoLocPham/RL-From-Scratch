@@ -1,38 +1,63 @@
-# Build GRPO from scratch
+# Build verl's GRPO from scratch
 
-Do not open `../common.py` first. The useful work is reconstructing the two
-operations from their behavior, then using `check.py` as feedback. Reading the
-reference turns the exercise into transcription.
+Do not open `../common.py` first. Work from the docstring in `grpo.py` and the
+grader's messages.
+
+**Finish `PPO/from_scratch/` first.** `grpo.py` imports your `agg_loss`,
+`compute_policy_loss` and `kl_penalty` from there, and this grader checks them.
+That is not an artificial dependency: in verl all of it lives in one
+`core_algos.py`, and a GRPO trainer calls exactly those functions.
 
 | Stage | Function | Question it answers |
 |---|---|---|
-| 1 | `group_relative_advantage` | How can the sampled group replace a value-function baseline? |
-| 2 | `clipped_surrogate_loss` | How does PPO prevent one policy-ratio update from moving too far? |
-| 3 | `kl_penalty_k3` | How can one sampled token estimate KL without negative values? |
-| 4 | extended `clipped_surrogate_loss` | How does GRPO stay near a frozen reference policy? |
+| 1 | `compute_grpo_outcome_advantage` | How can the sampled group replace a value function? |
+| 2 | the re-exports | What does GRPO actually change about PPO? |
 
-Run `python GRPO/from_scratch/check.py` from the repository root. The grader
-stops at the first incomplete stage.
+Run `python GRPO/from_scratch/check.py` from the repository root.
 
-The formulas follow Agent0's GRPO implementation in
-`Agent0/executor_train/verl_tool/trainer/ppo/core_algos.py:225-257`: prompt-local
-standardization with an epsilon, then one completion advantage copied across
-its response mask. The policy objective is the PPO clipped surrogate extended
-by ADPO at `core_algos.py:327-372`. This repo keeps Agent0's `1e-6` smoothing
-constant; [Hugging Face TRL's GRPOTrainer](https://github.com/huggingface/trl/blob/8056842449d2abbc08abd2628c5608071f433bfc/trl/trainer/grpo_trainer.py#L2804-L2806)
-uses `1e-4` for the same denominator.
+## The short version
 
-Stages 3-4 implement the reference-policy term in equation (3) of
-[DeepSeekMath](https://arxiv.org/abs/2402.03300) using the non-negative `k3`
-estimator described in [Approximating KL Divergence](http://joschu.net/blog/kl-approx.html)
-and used by
-[TRL's GRPOTrainer](https://github.com/huggingface/trl/blob/8056842449d2abbc08abd2628c5608071f433bfc/trl/trainer/grpo_trainer.py#L3183-L3236).
+PPO trains a critic to predict expected reward and subtracts it. GRPO samples
+several responses to the **same prompt** and subtracts their own mean. That is
+the entire idea, and it deletes `compute_gae_advantage_return`,
+`compute_value_loss`, the value head and its optimizer — most of PPO's cost and
+most of its tuning surface.
 
-At the end, you should be able to answer:
+The exercise is one function because that is honestly how much of verl is
+GRPO-specific.
 
-- Why does normalizing all prompts together reintroduce prompt-difficulty bias?
-- Why is there one advantage per completion rather than per token?
-- Why does clipping behave differently when the advantage is negative?
-- What signal remains when every reward in a group is identical?
-- Why must a single-sample KL estimator be non-negative? If a naive estimator
-  is negative for one token, why is that sampling noise rather than negative KL?
+## Three details that are easy to get wrong
+
+1. **A singleton group takes `mean=0, std=1`,** not its own mean. Its own mean
+   would make the advantage identically zero and discard the sample.
+2. **`torch.std` is the sample (n-1) std.** Write-ups of GRPO frequently use the
+   population std and report visibly different numbers on small groups. Match
+   the code, not the write-up.
+3. **Return the same tensor twice.** Under outcome supervision there is no critic
+   to regress, so `returns` is meaningless — verl returns the pair anyway so
+   every estimator shares one signature.
+
+## One flag, one paper
+
+`norm_adv_by_std_in_grpo=False` subtracts the group mean without dividing by the
+group std. That is [Dr.GRPO](https://arxiv.org/abs/2503.20783) in full. Dividing
+by a per-group std ties the update size to how much that group happened to
+disagree, which correlates with response length and shows up as a length bias.
+
+GRPO itself is equation (3) of
+[DeepSeekMath](https://arxiv.org/abs/2402.03300); the implementation follows
+`compute_grpo_outcome_advantage` in
+[`verl/trainer/ppo/core_algos.py`](https://github.com/volcengine/verl/blob/main/verl/trainer/ppo/core_algos.py).
+
+## At the end, you should be able to answer
+
+- What signal remains when every sample in a group gets an identical reward, and
+  what does DAPO do about it? (`GRPO/run_grpo.py` prints this happening.)
+- Why does normalizing across the whole batch instead of per group reintroduce
+  prompt-difficulty bias?
+- There is one advantage per response, copied across all of its tokens. Why is
+  there no per-token credit assignment here, when PPO's GAE produces exactly that?
+- GRPO needs no critic. What does it give up in exchange, and when would you
+  still reach for PPO?
+- `Agent0/` builds ADPO on top of this function. Read `adpo_advantage` in
+  `Agent0/common.py` next to your answer here — the difference is one multiply.

@@ -15,11 +15,25 @@ Everything through ``difficulty_filter`` is plain Python, exactly as it is
 upstream; only ADPO needs torch.
 """
 
+import importlib.util
 import re
 from collections import Counter
 from math import exp, log
+from pathlib import Path
 
 import torch
+
+
+def _load(name, path):
+    """Import a module by path. Every directory here has a file named common.py."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# ADPO reuses verl's shared loss machinery unchanged; only the clip bound differs.
+_ppo = _load("ppo_common", Path(__file__).resolve().parent.parent / "PPO" / "common.py")
 
 # ---------------------------------------------------------------- extraction
 
@@ -364,36 +378,54 @@ def adpo_trust_scale(score, min_score=0.3, max_score=0.8, min_advantage_scale=0.
     return min_advantage_scale + trust * (1.0 - min_advantage_scale)
 
 
-def adpo_advantage(rewards, group_index, score, epsilon=1e-6,
-                   norm_adv_by_std_in_grpo=True, min_score=0.3, max_score=0.8,
-                   min_advantage_scale=0.5):
+def adpo_advantage(token_level_rewards, response_mask, index, score,
+                   epsilon=1e-6, norm_adv_by_std_in_grpo=True, min_score=0.3,
+                   max_score=0.8, min_advantage_scale=0.5):
     """Return GRPO's group-relative advantage, scaled by per-sample trust.
 
-    ``compute_adpo_outcome_advantage`` is ``compute_grpo_outcome_advantage``
-    line for line -- same grouping by uid, same singleton mean-0/std-1 special
-    case, same ``1e-6`` -- with one extra multiply at the end. Compare against
-    ``GRPO/common.py``'s ``group_relative_advantage``: the diff is ADPO's twist
-    and nothing else.
+    Same signature and shapes as ``compute_adpo_outcome_advantage``, which is
+    ``compute_grpo_outcome_advantage`` line for line -- same grouping by uid,
+    same singleton mean-0/std-1 special case, same ``1e-6``, same sample std --
+    plus one multiply at the end. Read it beside ``GRPO/common.py``'s
+    ``compute_grpo_outcome_advantage``: the diff is ADPO's whole contribution.
 
-    ``norm_adv_by_std_in_grpo=False`` drops the std divide, which is exactly
-    what Dr.GRPO's one-flag change does.
+    ``score`` is the extra input, one per row: the Step 4 difficulty label.
+    Getting it here at all required hand-editing verl's own ``compute_advantage``
+    dispatcher, because the registry has no generic way to know an estimator
+    wants a per-sample label pulled out of the batch.
+
+    ``norm_adv_by_std_in_grpo=False`` drops the std divide, exactly as Dr.GRPO's
+    one-flag change does.
     """
-    rewards = torch.as_tensor(rewards, dtype=torch.float32)
-    group_index = torch.as_tensor(group_index, device=rewards.device)
+    scores = token_level_rewards.sum(dim=-1)
     scale = adpo_trust_scale(score, min_score, max_score, min_advantage_scale)
-    advantages = torch.empty_like(rewards)
-    for group in torch.unique(group_index):
-        here = group_index == group
-        group_rewards = rewards[here]
-        if group_rewards.numel() == 1:
-            mean, std = torch.zeros(()), torch.ones(())
-        else:
-            mean, std = group_rewards.mean(), group_rewards.std(unbiased=True)
-        if norm_adv_by_std_in_grpo:
-            advantages[here] = (group_rewards - mean) / (std + epsilon)
-        else:
-            advantages[here] = group_rewards - mean
-    return advantages * scale
+
+    with torch.no_grad():
+        id2score = {}
+        for i in range(scores.shape[0]):
+            id2score.setdefault(index[i], []).append(scores[i])
+
+        id2mean, id2std = {}, {}
+        for idx, group in id2score.items():
+            if len(group) == 1:
+                id2mean[idx] = torch.tensor(0.0)
+                id2std[idx] = torch.tensor(1.0)
+            elif len(group) > 1:
+                id2mean[idx] = torch.mean(torch.tensor(group))
+                id2std[idx] = torch.std(torch.tensor(group))
+            else:
+                raise ValueError(f"no score in prompt index: {idx}")
+
+        for i in range(scores.shape[0]):
+            if norm_adv_by_std_in_grpo:
+                adv = (scores[i] - id2mean[index[i]]) / (id2std[index[i]] + epsilon)
+            else:
+                adv = scores[i] - id2mean[index[i]]
+            scores[i] = adv * scale[i]          # <- the entire ADPO twist
+
+        scores = scores.unsqueeze(-1) * response_mask
+
+    return scores, scores
 
 
 def adpo_clip_high(score, base_epsilon=0.2, max_epsilon_bonus=0.1,
@@ -414,24 +446,36 @@ def adpo_clip_high(score, base_epsilon=0.2, max_epsilon_bonus=0.1,
     return base_epsilon + exploration * max_epsilon_bonus
 
 
-def adpo_policy_loss(old_logp, logp, advantage, mask, score, base_epsilon=0.2,
-                     max_epsilon_bonus=0.1, min_score=0.3, max_score=0.8):
-    """PPO's clipped loss with a per-sample asymmetric clip range.
+def adpo_policy_loss(old_log_prob, log_prob, advantages, response_mask, score,
+                     base_epsilon=0.2, max_epsilon_bonus=0.1, min_score=0.3,
+                     max_score=0.8, loss_agg_mode="seq-mean-token-mean"):
+    """PPO's clipped loss with a PER-SAMPLE upper clip bound.
 
-    Log probabilities and ``mask`` are ``(N,T)``; ``advantage`` and ``score``
-    are ``(N,)``. Identical to the clipped surrogate in ``GRPO/common.py``
-    except that the upper bound is a column vector from :func:`adpo_clip_high`
-    rather than one shared scalar.
+    Returns ``(pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower)``, matching
+    ``compute_policy_loss_adpo``'s contract and PPO's.
+
+    Identical to ``PPO/common.py``'s ``compute_policy_loss`` except that the
+    upper bound is a column vector from :func:`adpo_clip_high` rather than one
+    shared scalar. The lower bound never moves, and ADPO has no dual clip, so
+    ``pg_clipfrac_lower`` is returned as a constant zero -- upstream does the
+    same.
     """
-    advantage = torch.as_tensor(advantage, dtype=torch.float32)
-    if advantage.ndim == 1:
-        advantage = advantage.unsqueeze(-1)
-    ratio = torch.exp(logp - old_logp)
+    if advantages.ndim == 1:
+        advantages = advantages.unsqueeze(-1)
     high = 1.0 + adpo_clip_high(score, base_epsilon, max_epsilon_bonus,
                                 min_score, max_score).unsqueeze(-1)
+
+    negative_approx_kl = log_prob - old_log_prob
+    ratio = torch.exp(negative_approx_kl)
+    ppo_kl = _ppo.masked_mean(-negative_approx_kl, response_mask)
+
+    pg_losses1 = -advantages * ratio
     # Two steps because the lower bound is a scalar and the upper is per-sample;
     # torch.clamp will not mix the two.
-    clipped = torch.minimum(ratio.clamp_min(1.0 - base_epsilon), high)
-    per_token_loss = torch.maximum(-advantage * ratio, -advantage * clipped)
-    mask = mask.to(per_token_loss.dtype)
-    return (per_token_loss * mask).sum() / mask.sum().clamp_min(1)
+    pg_losses2 = -advantages * torch.minimum(ratio.clamp_min(1.0 - base_epsilon), high)
+    pg_losses = torch.maximum(pg_losses1, pg_losses2)
+
+    pg_loss = _ppo.agg_loss(loss_mat=pg_losses, loss_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode)
+    pg_clipfrac = _ppo.masked_mean(torch.gt(pg_losses2, pg_losses1).float(), response_mask)
+    return pg_loss, pg_clipfrac, ppo_kl, torch.tensor(0.0)

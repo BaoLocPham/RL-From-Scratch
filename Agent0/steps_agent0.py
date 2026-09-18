@@ -133,17 +133,20 @@ import torch  # noqa: E402
 difficulties = torch.tensor([0.75, 0.35, 0.35, 0.75])
 answers = ["\\boxed{42}", "\\boxed{17}", "\\boxed{42}", "\\boxed{8}"]
 truths = ["42", "42", "42", "8"]
-step5_rewards = torch.tensor([correctness_score(a, g) for a, g in zip(answers, truths)])
-groups = torch.zeros(4, dtype=torch.long)  # all four share one prompt group
+scalar = torch.tensor([correctness_score(a, g) for a, g in zip(answers, truths)])
+step5_rewards = scalar.unsqueeze(-1)                 # (4, 1) token-level rows
+mask = torch.ones_like(step5_rewards)
+index = ["q"] * 4                                    # all four share one prompt group
 # min_advantage_scale=1.0 pins every trust factor at 1.0, which is plain GRPO.
-raw = adpo_advantage(step5_rewards, groups, difficulties, min_advantage_scale=1.0)
-scaled = adpo_advantage(step5_rewards, groups, difficulties)
+raw = adpo_advantage(step5_rewards.clone(), mask, index, difficulties,
+                     min_advantage_scale=1.0)[0][:, 0]
+scaled = adpo_advantage(step5_rewards.clone(), mask, index, difficulties)[0][:, 0]
 scale = adpo_trust_scale(difficulties)
 highs = 1.0 + adpo_clip_high(difficulties)
 print(f"{'reward':>7}{'difficulty':>12}{'raw_adv':>9}{'scale':>7}"
       f"{'scaled_adv':>12}{'clip_high':>11}")
 for i in range(4):
-    print(f"{step5_rewards[i]:>7.1f}{difficulties[i]:>12.2f}{raw[i]:>9.2f}"
+    print(f"{scalar[i]:>7.1f}{difficulties[i]:>12.2f}{raw[i]:>9.2f}"
           f"{scale[i]:>7.2f}{scaled[i]:>12.2f}{highs[i]:>11.3f}")
 print("Rows 1 and 3 earned the same raw advantage -- both correct, same group.")
 print("Row 1 (easy) keeps it nearly in full; row 3 (hard) is shrunk to a smaller,")
