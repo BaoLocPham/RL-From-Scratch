@@ -140,10 +140,14 @@ def gate_against_claim(majority, claimed, score, equivalent, floor=0.1):
 def tool_reward(predict, weight=0.05, cap=4):
     """Pay for sandbox round-trips, by the count, up to a cap.
 
-    Every time the Executor runs Python mid-answer, the transcript gains one
-    ```` ```output ```` fence. The real reward counts them and pays ``weight``
-    each, up to ``cap`` of them -- worth up to 0.20, not the flat 0.05 it is
-    usually described as.
+    Counts ```` ```output ```` fences and pays ``weight`` each, up to ``cap``
+    of them -- worth up to 0.20, not the flat 0.05 it is usually described as.
+
+    Careful whose text this is. Upstream calls it on the CURRICULUM AGENT's own
+    generation, not on the solver's answer, so it rewards the proposer for
+    reaching for the sandbox while composing a question. The function itself
+    does not care -- it just counts -- but the docstrings around it often get
+    this backwards.
 
     Counted rather than flagged, so two tool calls beat one. Capped, so the
     model cannot farm reward with an unbounded loop of trivial calls.

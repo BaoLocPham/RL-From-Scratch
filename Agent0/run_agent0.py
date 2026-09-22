@@ -50,7 +50,7 @@ SOLVE_RATE = torch.tensor([0.95, 0.80, 0.50, 0.25, 0.05])
 # questions per difficulty band; this miniature has five, so at the paper's own
 # 0.5 threshold the penalty would punish whichever template the policy settled
 # on -- crowding standing in for repetition, which is not what it is for.
-# Section 5 of steps_agent0.py shows the penalty biting as intended.
+# Section 5 of steps_curriculum.py shows the penalty biting as intended.
 WORDING = [
     "Compute {} plus zero.",
     "Compute the area of a {} by 7 rectangle.",
@@ -78,7 +78,12 @@ def wording(template, generator):
 
 
 def transcript(template, generator):
-    """A stand-in answer transcript; harder questions provoke more tool calls."""
+    """The PROPOSER's own generation, standing in for predicts[i].
+
+    Upstream counts output fences here, in the Curriculum Agent's own text --
+    not in the solver's answer -- so harder templates are modelled as ones the
+    proposer had to check with code before committing to an answer.
+    """
     calls = int(torch.randint(int(template) + 1, (1,), generator=generator))
     return "```output\n...\n```" * calls
 

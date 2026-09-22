@@ -43,13 +43,32 @@ pip install -r requirements.txt
 ./scripts/run_ppo.sh diff       # prove yours matches the reference
 ```
 
-`run_grpo.sh` and `run_agent0.sh` take the same commands. Or call the files
-directly:
+`run_grpo.sh` and `run_agent0.sh` take the same commands. `Agent0` adds three
+of its own, since it is the only module training two agents:
+
+```bash
+./scripts/run_agent0.sh overview     # the iteration flow, and a glossary
+./scripts/run_agent0.sh trace        # one question through Step 3 and Step 4
+./scripts/run_agent0.sh curriculum   # or executor, for one half at a time
+```
+
+Start with `overview` — it draws what generates what, who is frozen, and where
+weights actually move, then defines every term the other scripts print.
+
+Or call the files directly:
 
 ```bash
 python PPO/steps_ppo.py      python PPO/run_ppo.py      python PPO/from_scratch/check.py
 python GRPO/steps_grpo.py    python GRPO/run_grpo.py    python GRPO/from_scratch/check.py
 python Agent0/steps_agent0.py python Agent0/run_agent0.py python Agent0/from_scratch/check.py
+```
+
+`Agent0/` has one walkthrough per agent, and `steps_agent0.py` runs both in
+dependency order:
+
+```bash
+python Agent0/steps_curriculum.py   # the proposer -- writes questions, GRPO
+python Agent0/steps_executor.py    # the solver   -- answers them, ADPO
 ```
 
 Set `RL_IMPL=scratch` to run any walkthrough against your own implementation

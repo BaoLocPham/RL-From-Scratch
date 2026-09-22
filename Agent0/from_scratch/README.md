@@ -20,8 +20,10 @@ and here only the idea is left blank.
 Run `python Agent0/from_scratch/check.py` from the repository root. The grader
 stops at the first incomplete stage. Nothing in this file needs torch.
 
-Once it passes, `RL_IMPL=scratch python Agent0/steps_agent0.py` runs the
-walkthrough against your implementation instead of the reference.
+Once it passes, `RL_IMPL=scratch python Agent0/steps_curriculum.py` runs the
+walkthrough against your implementation instead of the reference. All six
+functions live on the curriculum side; `steps_executor.py` is ADPO, which is
+reference material and does not switch.
 
 ## What this covers, and what it does not
 
@@ -32,6 +34,23 @@ fixing that shape in your head before starting:
 |---|---|---|
 | Curriculum Agent | writes new questions | **GRPO** (Step 3) |
 | Executor Agent, the solver | answers them, with a Python tool | **ADPO** (Step 5) |
+
+### What "Step 3" and "Step 4" mean
+
+Agent0's pipeline is numbered 1–5. Steps 3 and 4 both involve the Curriculum
+Agent, which makes them easy to conflate — but only one of them trains it:
+
+| | Step 3 | Step 4 |
+|---|---|---|
+| Purpose | **Train** the Curriculum Agent | **Curate** a dataset |
+| Does anything learn? | Yes — GRPO updates the proposer | No. Zero gradients |
+| Who is frozen | the Executor | **both** agents |
+| Attempts per question | 10, **with** the Python sandbox | 9, plain generation, **no** tool |
+| Gated against the claimed answer? | Yes — mismatch scores 0 | No — the majority *becomes* the label |
+| Output | a weight update | `train.parquet`, plus a difficulty per row |
+
+Step 3 is the proposer learning to aim; Step 4 is the trained proposer building
+the solver's homework. Step 5 is then the solver training on it, with ADPO.
 
 These six functions are Step 3's whole reward and Step 4's whole label — the
 part of Agent0 that is genuinely new. They feed both halves. The reward you
@@ -56,6 +75,22 @@ Traced from `aiming-lab/Agent0`, not from the paper:
 | 2, 3, 4 | `curriculum_train/vllm_service_init/start_vllm_server_tool.py` — `consolidate_and_grade` |
 | 3 (`"valid"` mode) | `curriculum_train/question_evaluate/evaluate.py` |
 | 5, 6 | `curriculum_train/examples/reward_function/curriculum_reward.py` |
+
+## Two upstream bugs this repo does not reproduce
+
+1. **The golden answer is truncated to one character.** `compute_score` does
+   `answers = extract_boxed_content(predicts[i])` and then `answers[-1]`. That
+   function returns a **string**, not a list, so `\boxed{40}` yields `"0"`.
+   The gate then compares the solver's majority against `"0"` and fails for any
+   multi-character answer. Every other call site uses the value as a string;
+   this one line treats it like the `re.findall` list beside it. We pair the
+   full string.
+2. **The tool bonus counts the wrong text — deliberately, it turns out.**
+   `calculate_tool_reward(predicts[i])` counts fences in the *Curriculum
+   Agent's own generation*, not in the solver's transcript. That is not a bug,
+   but it is easy to read backwards, and it changes what the term incentivizes:
+   the proposer checking its own answer with code, not the solver using a tool.
+   Stage 5's grader accepts either string — only the docstrings care.
 
 ## Four places where the code disagrees with how it gets described
 

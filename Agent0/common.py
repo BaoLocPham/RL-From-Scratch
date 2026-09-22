@@ -11,6 +11,24 @@ Only ADPO is implemented below; the Curriculum Agent's half of the loop uses
 the reward -- Agent0's questions have no answer key, so the reward has to come
 from the Executor agreeing with itself.
 
+Agent0's pipeline is numbered 1-5, and the step numbers below refer to it:
+
+  Steps 1-2  setup: two conda envs, deploy the SandboxFusion code service
+  Step 3     TRAIN the Curriculum Agent. It proposes a question; a frozen
+             Executor attempts it 10x with the sandbox; the attempts are voted
+             on and gated against the proposer's own claimed answer; GRPO turns
+             that reward into a weight update. No dataset is produced.
+  Step 4     CURATE. Nothing is trained. The frozen, just-trained Curriculum
+             Agent mass-generates ~8,000 questions; a frozen Executor answers
+             each 9x by plain generation -- no sandbox, no gate -- and its
+             majority answer BECOMES the label. The agreement fraction becomes
+             that question's difficulty. Rows inside [0.3, 0.8] are kept.
+  Step 5     TRAIN the Executor on what Step 4 kept, with ADPO.
+
+Steps 3 and 4 both vote on repeated Executor attempts, and they are separate
+runs of separate code with different sampling -- which is why
+:func:`self_consistency_score` needs a ``denominator`` argument at all.
+
 Traced from the real code in `aiming-lab/Agent0`, not from the paper:
 
   Step 3 reward      curriculum_train/examples/reward_function/curriculum_reward.py
@@ -76,9 +94,37 @@ def extract_boxed(text):
 def extract_question(text):
     """Return the last ``<question>...</question>`` body, or ``""``.
 
-    ``compute_score`` takes the last match and pairs it with the last boxed
-    answer; a generation missing either one is the malformed case that
+    ``compute_score`` takes the last match and pairs it with the boxed answer;
+    a generation missing either one is the malformed case that
     :func:`curriculum_reward` scores ``-1``.
+
+    .. warning::
+
+       Upstream has a bug at exactly this pairing, and this module does **not**
+       reproduce it. ``compute_score`` writes::
+
+           questions = re.findall(r"<question>(.*?)</question>", predicts[i], ...)
+           answers   = extract_boxed_content(predicts[i])
+           question  = questions[-1].strip()
+           answer    = answers[-1].strip()
+
+       ``re.findall`` returns a list, so ``questions[-1]`` is the last match and
+       is correct. But ``mathruler.extract_boxed_content`` is typed
+       ``(text: str) -> str`` and returns a **string**, so ``answers[-1]`` is
+       its **last character**. A proposer claiming ``\boxed{40}`` ships ``"0"``
+       as its golden answer.
+
+       Every other call site in the repo (``evaluate.py``, the grading server,
+       and ``accuracy_reward`` a few lines above) uses the return value directly
+       as a string; this one line treats it like the list beside it. The
+       consequence is that :func:`gate_against_claim` compares the Executor's
+       majority against a single character, so the gate fails for any
+       multi-character answer and the reward collapses to
+       ``-cluster_share + tool_reward``.
+
+       This repo pairs the full boxed string, which is what the code clearly
+       intends. If you are reproducing upstream numbers, expect the gate to pass
+       far more often here than it does there.
     """
     questions = re.findall(r"<question>(.*?)</question>", text, re.DOTALL)
     return questions[-1].strip() if questions else ""
@@ -221,11 +267,17 @@ def tool_reward(predict, weight=0.05, cap=4):
     """Reward Python calls by the count, up to a cap.
 
     ``calculate_tool_reward`` counts occurrences of the ```` ```output ````
-    fence -- one per sandbox round-trip the Executor completed -- and pays
-    ``weight`` each up to ``cap``. It is worth up to 0.20, not the flat 0.05
-    bonus the shape is usually described as, and a capped count rather than a
-    flag so that using the tool twice beats using it once without paying for
+    fence and pays ``weight`` each up to ``cap``. Worth up to 0.20, not the flat
+    0.05 bonus the shape is usually described as, and a capped count rather than
+    a flag so that using the tool twice beats using it once without paying for
     an unbounded loop of trivial calls.
+
+    **Whose text is counted matters, and it is not the obvious one.**
+    ``compute_score`` calls this on ``predicts[i]`` -- the *Curriculum Agent's
+    own generation*, the text containing ``<question>`` -- not on the Executor's
+    solving transcript. So the term rewards the **proposer** for reaching for
+    the sandbox while it composes and checks a question, not the solver for
+    using one while answering. Pass the proposer's generation here.
     """
     if not predict:
         return 0.0

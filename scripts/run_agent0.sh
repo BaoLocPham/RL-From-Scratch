@@ -12,6 +12,15 @@
 #   diff      prove your implementation matches: check, then steps vs scratch
 #   all       check, steps, run
 #
+# Agent0 only, since it alone trains two agents with two algorithms:
+#
+#   overview    the iteration flow diagram, and the glossary of terms
+#   trace       ONE question followed through Step 3 and Step 4, narrated
+#   curriculum  the proposer's half -- writes questions, plain GRPO
+#   executor    the solver's half   -- answers them, ADPO
+#
+# For Agent0, 'steps' runs both of those in dependency order.
+#
 # With no command, prints this list.
 
 set -euo pipefail
@@ -35,7 +44,7 @@ if [ -z "$PYTHON" ]; then
 fi
 
 usage() {
-    sed -n '3,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
 }
 
 banner() {
@@ -55,6 +64,33 @@ cmd_steps() {
 cmd_scratch() {
     banner "walkthrough (your implementation)"
     RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py"
+}
+
+cmd_half() {
+    if [ "$MODULE" != "Agent0" ]; then
+        echo "'$1' is Agent0 only; $MODULE has a single agent" >&2
+        return 1
+    fi
+    banner "Agent0: the $1 half"
+    "$PYTHON" "Agent0/steps_$1.py"
+}
+
+cmd_overview() {
+    if [ "$MODULE" != "Agent0" ]; then
+        echo "'overview' is Agent0 only" >&2
+        return 1
+    fi
+    banner "Agent0: the iteration flow, and the terms"
+    "$PYTHON" "Agent0/overview.py"
+}
+
+cmd_trace() {
+    if [ "$MODULE" != "Agent0" ]; then
+        echo "'trace' is Agent0 only" >&2
+        return 1
+    fi
+    banner "Agent0: one question through Step 3 and Step 4"
+    "$PYTHON" "Agent0/trace_one_question.py"
 }
 
 cmd_run() {
@@ -89,7 +125,11 @@ case "${1:-}" in
     check)   cmd_check   ;;
     steps)   cmd_steps   ;;
     scratch) cmd_scratch ;;
-    run)     cmd_run     ;;
+    run)        cmd_run ;;
+    curriculum) cmd_half curriculum ;;
+    executor)   cmd_half executor ;;
+    overview)   cmd_overview ;;
+    trace)      cmd_trace ;;
     diff)    cmd_diff    ;;
     all)     cmd_all     ;;
     ""|-h|--help|help) usage ;;
