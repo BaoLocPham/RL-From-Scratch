@@ -16,8 +16,12 @@ paper.
 - `GRPO/`: group-relative outcome advantage, and the Dr.GRPO flag. Everything
   else it needs is PPO's, imported rather than copied — as in verl, where all of
   it lives in one file.
-- `Agent0/`: self-consistency scoring, the curriculum reward, the difficulty
-  band filter, and ADPO's difficulty-aware advantage scaling and clip range.
+- `Agent0/`: two agents trained against each other with two different
+  algorithms — a **Curriculum Agent** that writes questions, trained with plain
+  **GRPO**, and an **Executor Agent** (the solver) that answers them, trained
+  with **ADPO**. Covers the self-consistency scoring and curriculum reward that
+  drive the first, the difficulty band filter that feeds the second, and ADPO's
+  difficulty-aware advantage scaling and clip range.
 
 Each directory has a reference implementation (`common.py`), a literal
 walkthrough (`steps_*.py`), a runnable demonstration (`run_*.py`), and a staged

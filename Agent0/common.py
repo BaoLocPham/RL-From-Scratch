@@ -1,5 +1,16 @@
 """Agent0's self-consistency reward, curation filter, and ADPO.
 
+Agent0 trains two models against each other, with a different algorithm each:
+
+  Curriculum Agent   writes questions    -> GRPO, plain and unmodified (Step 3)
+  Executor Agent     solves them, with   -> ADPO, this paper's own variant
+                     a Python sandbox       (Step 5). Also called the solver.
+
+Only ADPO is implemented below; the Curriculum Agent's half of the loop uses
+``GRPO/common.py`` as it stands. What this module contributes to that half is
+the reward -- Agent0's questions have no answer key, so the reward has to come
+from the Executor agreeing with itself.
+
 Traced from the real code in `aiming-lab/Agent0`, not from the paper:
 
   Step 3 reward      curriculum_train/examples/reward_function/curriculum_reward.py

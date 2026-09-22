@@ -25,15 +25,26 @@ walkthrough against your implementation instead of the reference.
 
 ## What this covers, and what it does not
 
-These six functions are Step 3's whole reward and Step 4's whole label. They
-are the part of Agent0 that is genuinely new — the rest of its training loop is
-GRPO, which you have already built one directory over.
+Agent0 trains **two** models with **two different algorithms**, and it is worth
+fixing that shape in your head before starting:
 
-ADPO is in `../common.py` as reference only, along with the `[0.3, 0.8]` band
-filter and the Executor's `+1`/`-1` reward. Read
-`adpo_advantage` next to `GRPO/common.py`'s `compute_grpo_outcome_advantage`: they
-are the same function plus one multiply, and that multiply is the paper's
-contribution.
+| Agent | Job | Algorithm |
+|---|---|---|
+| Curriculum Agent | writes new questions | **GRPO** (Step 3) |
+| Executor Agent, the solver | answers them, with a Python tool | **ADPO** (Step 5) |
+
+These six functions are Step 3's whole reward and Step 4's whole label — the
+part of Agent0 that is genuinely new. They feed both halves. The reward you
+build in stage 6 is what GRPO turns into a Curriculum Agent update; the label
+that `self_consistency_score` produces in stage 3 is what later becomes ADPO's
+per-question difficulty, and so decides how hard the solver is pushed.
+
+The algorithms themselves are not exercises here. Plain GRPO is one directory
+over, in `GRPO/`, and is used by Agent0 completely unmodified. ADPO is in
+`../common.py` as reference only, along with the `[0.3, 0.8]` band filter and
+the Executor's `+1`/`-1` reward. Read `adpo_advantage` next to `GRPO/common.py`'s
+`compute_grpo_outcome_advantage`: they are the same function plus one multiply,
+and that multiply is the paper's contribution.
 
 ## Where the code came from
 

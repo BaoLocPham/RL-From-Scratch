@@ -59,5 +59,9 @@ GRPO itself is equation (3) of
   there no per-token credit assignment here, when PPO's GAE produces exactly that?
 - GRPO needs no critic. What does it give up in exchange, and when would you
   still reach for PPO?
-- `Agent0/` builds ADPO on top of this function. Read `adpo_advantage` in
-  `Agent0/common.py` next to your answer here — the difference is one multiply.
+- `Agent0/` uses this function twice over. Its Curriculum Agent — the one that
+  writes questions — is trained with exactly what you just built, unmodified.
+  Its Executor, the solver, gets ADPO instead: read `adpo_advantage` in
+  `Agent0/common.py` next to your answer here, and the difference is one
+  multiply. Why would the same system want a difficulty-aware update for the
+  solver but a plain one for the proposer?

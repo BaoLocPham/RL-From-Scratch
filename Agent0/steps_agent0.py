@@ -128,6 +128,9 @@ print("No partial credit and no format penalty; a missing answer is just wrong."
 print("All of the difficulty-awareness lives in ADPO, below.")
 
 print("\n8. ADPO scales that reward by how hard the question was")
+print("Note which agent this is. Everything above trains the Curriculum Agent,")
+print("and that half uses plain GRPO, unmodified. ADPO is the OTHER half: it")
+print("trains the Executor, the solver, on the questions the Curriculum wrote.")
 import torch  # noqa: E402
 
 difficulties = torch.tensor([0.75, 0.35, 0.35, 0.75])
