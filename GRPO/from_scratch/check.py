@@ -4,18 +4,33 @@ import sys
 import traceback
 from pathlib import Path
 
+import numpy as np
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
-import grpo as sol
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
 
-ADV = torch.tensor([-0.9999900460, 0.0, 0.9999900460,
-                    -0.9999998212, 0.0, 0.9999998212])
-SINGLETON = torch.tensor([6.9999933243])
-LOSS = -0.3222221434
-K3 = torch.tensor([[0.3678793907, 0.0, 0.1487212181, 4.3890562057]])
-NAIVE_LOG_RATIO = torch.tensor([[1.0, 0.0, -0.5, -2.0]])
-LOSS_WITH_KL = -0.3221295178
+try:
+    import grpo as sol
+except Exception as exc:  # the PPO exercise is imported by grpo.py
+    print("could not import grpo.py -- it imports your PPO/from_scratch/ppo.py, "
+          f"so finish that one first.\n  {type(exc).__name__}: {exc}")
+    raise SystemExit(1)
+
+R = torch.tensor([[0., 0., 1., 0.], [0., 0., 0., 0.],
+                  [0., 0., 0.5, 0.], [0., -1., 0., 0.]])
+M = torch.tensor([[1., 1., 1., 0.], [1., 1., 0., 0.],
+                  [1., 1., 1., 1.], [1., 1., 0., 0.]])
+INDEX = np.array(["a", "a", "a", "b"])
+
+ADV = torch.tensor([[0.99999797, 0.99999797, 0.99999797, 0.],
+                    [-0.99999797, -0.99999797, 0., 0.],
+                    [0., 0., 0., 0.],
+                    [-0.99999905, -0.99999905, 0., 0.]])
+DRGRPO = torch.tensor([[0.5, 0.5, 0.5, 0.],
+                       [-0.5, -0.5, 0., 0.],
+                       [0., 0., 0., 0.],
+                       [-1.0, -1.0, 0., 0.]])
 
 
 class Fail(Exception):
@@ -30,6 +45,10 @@ def need(condition, message):
 def call(fn, *args, **kwargs):
     try:
         value = fn(*args, **kwargs)
+    except TypeError as exc:
+        if "llipsis" in str(exc):
+            raise Fail(f"a TODO is still an ellipsis: {exc}") from exc
+        raise Fail(f"raised TypeError: {exc}") from exc
     except Exception as exc:
         raise Fail(f"raised {type(exc).__name__}: {exc}") from exc
     need(value is not None, "returned None; finish this stage's TODO")
@@ -37,85 +56,83 @@ def call(fn, *args, **kwargs):
 
 
 def close(actual, expected, atol=1e-5):
-    return torch.allclose(torch.as_tensor(actual), torch.as_tensor(expected), atol=atol)
+    return torch.allclose(torch.as_tensor(actual, dtype=torch.float32),
+                          torch.as_tensor(expected, dtype=torch.float32), atol=atol)
 
 
 def stage_1():
-    rewards = torch.tensor([0.9, 1.0, 1.1, -5.0, 0.0, 5.0])
-    groups = torch.tensor([0, 0, 0, 1, 1, 1])
-    got = call(sol.group_relative_advantage, rewards, groups)
-    need(tuple(got.shape) == (6,), f"expected shape (6,), got {tuple(got.shape)}")
-    if not close(got, ADV):
-        global_answer = (rewards - rewards.mean()) / (rewards.std() + 1e-6)
-        if close(got, global_answer):
-            raise Fail("normalized the whole batch; GRPO's baseline is prompt-local")
-        raise Fail(f"wrong per-group advantages: got {got.tolist()}")
-    equal = call(sol.group_relative_advantage, torch.tensor([2.0, 2.0, 2.0]),
-                 torch.tensor([4, 4, 4]))
-    need(torch.isfinite(equal).all() and close(equal, torch.zeros(3)),
-         "an identical-reward group must be finite and near zero; keep the epsilon")
-    one = call(sol.group_relative_advantage, torch.tensor([7.0]), torch.tensor([9]))
-    need(close(one, SINGLETON),
-         "singleton handling differs from Agent0: its special-case mean is zero and std is one")
+    got = call(sol.compute_grpo_outcome_advantage, R.clone(), M, INDEX)
+    need(isinstance(got, tuple) and len(got) == 2,
+         "return the pair (advantages, returns)")
+    advantages, returns = got
+    need(tuple(advantages.shape) == (4, 4),
+         f"advantages must be (bs, response_length) = (4, 4), got {tuple(advantages.shape)}")
+
+    if close(advantages[2], torch.tensor([0., 0., 0., 0.])) and not close(advantages, ADV):
+        pass  # row 2 is legitimately zero; fall through to the full comparison
+
+    flat = R.sum(dim=-1)
+    whole_batch = (flat - flat.mean()) / (flat.std() + 1e-6)
+    if close(advantages[:, 0], whole_batch):
+        raise Fail("standardized the whole batch; GRPO's baseline is the prompt "
+                   "group, so rows sharing an index compare only against each other")
+
+    need(close(advantages, ADV),
+         f"wrong advantages.\n  expected {ADV.tolist()}\n  got      {advantages.tolist()}")
+    need(advantages is returns or close(returns, advantages),
+         "with outcome supervision there is nothing to regress, so return the same "
+         "tensor for both")
+
+    padded = advantages * (1 - M)
+    need(float(padded.abs().sum()) == 0.0,
+         "masked-out positions must be zero; multiply through by response_mask")
+
+    # Row 3 is alone in group "b": mean 0, std 1, so its advantage is its own score.
+    need(close(advantages[3, 0], -0.99999905),
+         "a singleton group takes mean=0 and std=1, not its own mean -- its own mean "
+         "would zero the advantage and waste the sample")
+
+    got = call(sol.compute_grpo_outcome_advantage, R.clone(), M, INDEX,
+               norm_adv_by_std_in_grpo=False)[0]
+    if close(got, ADV):
+        raise Fail("norm_adv_by_std_in_grpo=False changed nothing; Dr.GRPO subtracts "
+                   "the group mean WITHOUT dividing by the group std")
+    need(close(got, DRGRPO),
+         f"wrong Dr.GRPO advantages.\n  expected {DRGRPO.tolist()}\n  got      {got.tolist()}")
+
+    equal = call(sol.compute_grpo_outcome_advantage,
+                 torch.tensor([[1., 0.], [1., 0.], [1., 0.]]),
+                 torch.ones(3, 2), np.array(["z", "z", "z"]))[0]
+    need(torch.isfinite(equal).all() and close(equal, torch.zeros(3, 2)),
+         "a group whose rewards are all equal has zero std; the epsilon must keep "
+         "that finite and near zero")
+
+    population = torch.tensor([1.0, 0.0, 0.5])
+    pop_std = float(population.std(unbiased=False))
+    sample_std = float(population.std(unbiased=True))
+    guess = (1.0 - population.mean()) / (pop_std + 1e-6)
+    if close(advantages[0, 0], guess) and abs(pop_std - sample_std) > 1e-6:
+        raise Fail("that is the population std; torch.std defaults to the sample "
+                   "(n-1) std, which is what verl uses")
 
 
 def stage_2():
-    old = torch.zeros(3, 4)
-    ratio = torch.tensor([[1.3, 1.0, 0.7, 1.0],
-                          [0.8, 1.2, 1.4, 1.0],
-                          [1.1, 0.9, 1.0, 1.0]])
-    advantage = torch.tensor([1.0, -1.0, 0.5])
-    mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0], [1, 1, 1, 1]], dtype=torch.float32)
-    got = call(sol.clipped_surrogate_loss, old, ratio.log(), advantage, mask)
-    need(torch.as_tensor(got).ndim == 0, "loss must be one scalar")
-    need(close(got, LOSS),
-         f"wrong clipped loss: expected {LOSS:.10f}, got {float(got):.10f}; check negative advantages and masked denominator")
-    ragged = call(sol.clipped_surrogate_loss, torch.zeros(2, 3),
-                  torch.tensor([[1.1, 0.9, 1.0], [0.8, 1.4, 1.0]]).log(),
-                  torch.tensor([1.0, -1.0]),
-                  torch.tensor([[1, 1, 1], [1, 0, 0]], dtype=torch.float32))
-    need(torch.as_tensor(ragged).ndim == 0,
-         "advantage must broadcast down each completion row, not across tokens")
-
-
-def stage_3():
-    ref_logp = torch.tensor([[-1.0, 0.0, 0.5, 2.0]])
-    logp = torch.zeros_like(ref_logp)
-    got = call(sol.kl_penalty_k3, ref_logp, logp)
-    need(tuple(got.shape) == (1, 4), f"expected per-token shape (1, 4), got {tuple(got.shape)}")
-    if close(got, NAIVE_LOG_RATIO):
-        raise Fail("returned the naive log-ratio estimator; it can be negative on one sample")
-    need(close(got, K3), f"wrong k3 values: expected {K3.tolist()}, got {got.tolist()}")
-    need(bool((got >= 0).all()), "k3 must stay non-negative on every sampled token")
-
-
-def stage_4():
-    old = torch.zeros(3, 4)
-    ratio = torch.tensor([[1.3, 1.0, 0.7, 1.0],
-                          [0.8, 1.2, 1.4, 1.0],
-                          [1.1, 0.9, 1.0, 1.0]])
-    logp = ratio.log()
-    advantage = torch.tensor([1.0, -1.0, 0.5])
-    mask = torch.tensor([[1, 1, 1, 0], [1, 1, 0, 0], [1, 1, 1, 1]], dtype=torch.float32)
-    ref_logp = logp + torch.tensor([[0.05, -0.05, 0.10, 0.00],
-                                    [-0.10, 0.05, 0.00, 0.00],
-                                    [0.02, -0.02, 0.05, -0.05]])
-    got = call(sol.clipped_surrogate_loss, old, logp, advantage, mask,
-               ref_logp=ref_logp, beta=0.05)
-    need(close(got, LOSS_WITH_KL),
-         f"wrong clipped-plus-KL loss: expected {LOSS_WITH_KL:.10f}, got {float(got):.10f}")
-    no_weight = call(sol.clipped_surrogate_loss, old, logp, advantage, mask,
-                     ref_logp=ref_logp, beta=0.0)
-    need(close(no_weight, LOSS), "beta=0 must preserve the original clipped-only loss")
-    no_reference = call(sol.clipped_surrogate_loss, old, logp, advantage, mask, beta=0.05)
-    need(close(no_reference, LOSS), "without a reference, preserve the original clipped-only loss")
+    for name in ("agg_loss", "compute_policy_loss", "kl_penalty"):
+        need(hasattr(sol, name),
+             f"{name} should be importable from grpo.py -- verl keeps it beside the "
+             "GRPO advantage in one core_algos.py, and a GRPO trainer calls it")
+    loss = torch.tensor([[1., 2., 3., 100.], [4., 5., 100., 100.]])
+    mask = torch.tensor([[1., 1., 1., 0.], [1., 1., 0., 0.]])
+    need(close(call(sol.agg_loss, loss, mask, "token-mean"), 3.0),
+         "the agg_loss re-exported here is your PPO one; make PPO stage 3 pass first")
+    k3 = call(sol.kl_penalty, torch.tensor([[-1.0]]), torch.tensor([[-1.2]]), "k3")
+    need(close(k3, torch.tensor([[0.01873076]])),
+         "the kl_penalty re-exported here is your PPO one; make PPO stage 7 pass first")
 
 
 STAGES = [
-    ("group-relative advantage", stage_1),
-    ("clipped surrogate", stage_2),
-    ("non-negative k3 KL", stage_3),
-    ("clipped surrogate plus KL", stage_4),
+    ("group-relative outcome advantage", stage_1),
+    ("the pieces GRPO shares with PPO", stage_2),
 ]
 
 for number, (name, stage) in enumerate(STAGES, 1):
@@ -126,5 +143,6 @@ for number, (name, stage) in enumerate(STAGES, 1):
         print(f"stage {number}: {name} -- FAIL\n  {exc}")
         raise SystemExit(1)
     except Exception:
-        traceback.print_exc(); raise SystemExit(1)
+        traceback.print_exc()
+        raise SystemExit(1)
 print("all GRPO stages pass")
