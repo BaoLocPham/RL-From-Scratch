@@ -45,7 +45,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from common import (bleu_cluster_share, default_equivalent,  # noqa: E402
                     difficulty_filter, extract_question)
-from overview import print_terms  # noqa: E402
+from overview import equation, print_terms  # noqa: E402
 
 if os.getenv("RL_IMPL") == "scratch":
     sys.path.insert(0, str(HERE / "from_scratch"))
@@ -96,6 +96,13 @@ step3 = self_consistency_score(sampled, eq, denominator="candidates")
 step4 = self_consistency_score(sampled, eq, denominator="valid")
 print(f"Step 3 (consolidate_and_grade, / 10 candidates): {step3[1]:.4f}")
 print(f"Step 4 (evaluate.py, / 8 that answered):         {step4[1]:.4f}")
+valid = [a for a in sampled if a]
+top = max(cluster_answers(sampled, eq).values())
+equation("p_step3", "max_count / n_candidates",
+         f"{top} / {len(sampled)}", f"{step3[1]:.4f}")
+equation("p_step4", "max_count / n_that_ANSWERED",
+         f"{top} / {len(valid)}", f"{step4[1]:.4f}")
+print()
 print("Two candidates returned nothing. Step 3 counts that as disagreement;")
 print("Step 4 discards them first. Step 4's number is the one that survives")
 print("into train.parquet and becomes ADPO's difficulty label.")
@@ -107,6 +114,9 @@ scenarios = [
     ("too hard, coherently wrong", ["17"] * 7 + ["42"] * 3),
     ("genuinely incoherent", [str(value) for value in range(10)]),
 ]
+equation("gate", "p if (majority == claim and p > 0.1) else 0")
+equation("base", "min(gate, 1 - gate)")
+print()
 print(f"{'scenario':<28}{'majority':>10}{'p':>8}{'gated':>8}{'reward':>9}")
 rewards = []
 for name, attempts in scenarios:
@@ -122,6 +132,10 @@ print("\n4. the tent: min(score, 1 - score)")
 for value in [0.0, 0.1, 0.3, 0.5, 0.7, 0.9, 1.0]:
     height = min(value, 1.0 - value)
     print(f"  score={value:.1f}  base={height:.2f}  {'#' * int(height * 40)}")
+print()
+for value in (0.5, 0.9):
+    equation("base", "min(p, 1 - p)",
+             f"min({value:.2f}, {1 - value:.2f})", f"{min(value, 1 - value):.2f}")
 print("Peaks at 0.5. Always solvable and never solvable score identically.")
 
 print("\n5. the three terms, separately and then together")
@@ -147,10 +161,14 @@ print(f"tool reward capped at four calls:            {tool_reward('```output' * 
 print("Counted in the PROPOSER's own text, not the solver's -- this term")
 print("nudges the question-writer to verify its own answer with code.")
 print("\nassembled, for the well-calibrated question in a 4-question batch:")
-print(f"  base 0.50 - share {shares[0]:.2f} + tool {tool_reward(proposed):.2f}"
-      f" = {curriculum_reward(0.5, True, shares[0], proposed):.2f}")
-print(f"  malformed generation instead:          "
-      f"{curriculum_reward(0.0, False, shares[0], ''):.2f}")
+equation("tool", "min(output_fences, 4) * 0.05",
+         f"min({proposed.count('```output')}, 4) * 0.05", f"{tool_reward(proposed):.4f}")
+equation("reward", "base - cluster_share + tool",
+         f"0.5000 - {shares[0]:.4f} + {tool_reward(proposed):.4f}",
+         f"{curriculum_reward(0.5, True, shares[0], proposed):.4f}")
+equation("malformed", "-1.0 - cluster_share + tool",
+         f"-1.0000 - {shares[0]:.4f} + 0.0000",
+         f"{curriculum_reward(0.0, False, shares[0], ''):.4f}")
 print("A perfectly calibrated question can still end up net negative, purely")
 print("for arriving in a crowded batch. Variety is not a tiebreaker here.")
 
@@ -167,6 +185,10 @@ kept = difficulty_filter(rows)
 for row in rows:
     mark = "keep" if row in kept else "drop"
     print(f"  score={row['score']:.2f} answer={row['answer']!r:<5} -> {mark}")
+print()
+equation("keep?", "min_score <= score <= max_score  and  answer != ''",
+         "0.3 <= score <= 0.8")
+print()
 print("A flat box, not a shaped preference: 0.50 gets no bonus over 0.30.")
 print("Bounds are inclusive. Note upload.py's own --max_score default is 0.7,")
 print("while the documented invocation passes 0.8.")

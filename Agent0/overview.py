@@ -72,6 +72,18 @@ TERMS = {
 }
 
 
+def equation(label, form, *substitutions):
+    """Print an equation, then each substitution step, then the result.
+
+        p = max_count / n_candidates
+          = 5 / 10
+          = 0.5000
+    """
+    print(f"    {label:<9} = {form}")
+    for line in substitutions:
+        print(f"    {'':<9} = {line}")
+
+
 def print_terms(*stages, width=74):
     """Print the glossary for the named stages, or all of them."""
     for stage in (stages or TERMS):
