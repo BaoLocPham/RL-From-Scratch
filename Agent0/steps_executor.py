@@ -22,7 +22,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 from common import (adpo_advantage, adpo_clip_high, adpo_policy_loss,  # noqa: E402
                     adpo_trust_scale, correctness_score)
-from overview import print_terms  # noqa: E402
+from overview import equation, print_terms  # noqa: E402
 
 torch.set_printoptions(precision=4, sci_mode=False)
 
@@ -56,6 +56,13 @@ for value in (0.30, 0.40, 0.55, 0.70, 0.80):
     tensor = torch.tensor(value)
     trust = ((tensor - 0.3) / (0.8 - 0.3)).clamp(0, 1)
     print(f"{value:>11.2f}{float(trust):>14.2f}{float(adpo_trust_scale(tensor)):>13.2f}")
+print()
+for d in (0.30, 0.55, 0.80):
+    tw = min(max((d - 0.3) / 0.5, 0.0), 1.0)
+    equation("trust", "0.5 + clamp((d - 0.3) / (0.8 - 0.3), 0, 1) * 0.5",
+             f"0.5 + clamp(({d:.2f} - 0.3) / 0.5, 0, 1) * 0.5",
+             f"0.5 + {tw:.2f} * 0.5  =  {0.5 + tw * 0.5:.4f}")
+print()
 print("Hardest kept question -> x0.50, easiest -> x1.00. A hard question's")
 print("+1/-1 is the reward least likely to be right, so it teaches less.")
 
@@ -64,6 +71,13 @@ print(f"{'difficulty':>11}{'clip range':>22}")
 for value in (0.30, 0.40, 0.55, 0.70, 0.80):
     high = float(adpo_clip_high(torch.tensor(value)))
     print(f"{value:>11.2f}{f'[0.80, {1 + high:.3f}]':>22}")
+print()
+for d in (0.30, 0.80):
+    ew = min(max((0.8 - d) / 0.5, 0.0), 1.0)
+    equation("eps_high", "0.2 + clamp((0.8 - d) / (0.8 - 0.3), 0, 1) * 0.1",
+             f"0.2 + clamp((0.8 - {d:.2f}) / 0.5, 0, 1) * 0.1",
+             f"0.2 + {ew:.2f} * 0.1  =  {0.2 + ew * 0.1:.4f}")
+print()
 print("The LOWER bound never moves; only the upside widens, and only on hard")
 print("questions. Being right on a hard question does not yet mean the approach")
 print("generalizes, so the policy gets more room to try something else.")
@@ -89,6 +103,17 @@ print(f"{'reward':>7}{'difficulty':>12}{'raw_adv':>9}{'scale':>7}"
 for i in range(4):
     print(f"{scalar[i]:>7.1f}{difficulties[i]:>12.2f}{raw[i]:>9.2f}"
           f"{scale[i]:>7.2f}{scaled[i]:>12.2f}{highs[i]:>11.3f}")
+print()
+print("row 3 (hard, correct) in full:")
+equation("A_raw", "(reward - group_mean) / (group_std + 1e-6)",
+         f"({scalar[2]:+.1f} - {scalar.mean():.4f}) / ({scalar.std():.4f} + 1e-6)",
+         f"{raw[2]:+.4f}")
+equation("trust", "0.5 + clamp((d - 0.3) / 0.5, 0, 1) * 0.5",
+         f"0.5 + clamp(({difficulties[2]:.2f} - 0.3) / 0.5, 0, 1) * 0.5",
+         f"{scale[2]:.4f}")
+equation("A", "A_raw * trust",
+         f"{raw[2]:+.4f} * {scale[2]:.4f}", f"{scaled[2]:+.4f}")
+print()
 print("Rows 1 and 3 earned the same raw advantage -- both correct, same group.")
 print("Row 1 (easy) keeps it nearly in full; row 3 (hard) is shrunk to a")
 print("smaller, more cautious lesson, and gets the widest clip range.")
@@ -121,8 +146,16 @@ for i in (0, 2):
           f"{('yes' if float(ratio[i, 0]) > bound else 'no'):>10}")
 pg_loss, pg_clipfrac, ppo_kl, lower = adpo_policy_loss(
     old_log_prob, log_prob, advantages, mask, difficulties)
-print(f"\npg_loss={float(pg_loss):+.6f}  clipfrac={float(pg_clipfrac):.2f}"
-      f"  ppo_kl={float(ppo_kl):+.4f}  clipfrac_lower={float(lower):.2f}")
+print()
+equation("ratio", "exp(log_prob - old_log_prob)",
+         f"exp({float(log_prob[0, 0]):.4f} - 0.0000)", f"{float(ratio[0, 0]):.4f}")
+equation("clipped", "min(max(ratio, 1 - 0.2), 1 + eps_high)",
+         f"min(max({float(ratio[0, 0]):.4f}, 0.8000), {float(highs[0]):.4f})",
+         f"{min(max(float(ratio[0, 0]), 0.8), float(highs[0])):.4f}   <- row 0 IS clipped")
+equation("pg_loss", "agg( max(-A * ratio, -A * clipped) )",
+         f"{float(pg_loss):+.6f}")
+print(f"\nclipfrac={float(pg_clipfrac):.2f}  ppo_kl={float(ppo_kl):+.4f}"
+      f"  clipfrac_lower={float(lower):.2f}")
 print("Same move, two verdicts, purely because the questions differ in")
 print("difficulty. That is what a per-sample clip bound buys you.")
 print("\nOtherwise identical to PPO's compute_policy_loss: the upper bound is a")

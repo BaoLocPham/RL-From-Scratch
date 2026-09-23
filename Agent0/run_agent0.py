@@ -19,10 +19,12 @@ import torch
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
-from common import (adpo_advantage, adpo_policy_loss, adpo_trust_scale,  # noqa: E402
+from common import (adpo_advantage, adpo_clip_high, adpo_policy_loss,  # noqa: E402
+                    adpo_trust_scale,
                     bleu_cluster_share, correctness_score, curriculum_reward,
                     default_equivalent, difficulty_filter, gate_against_claim,
-                    self_consistency_score)
+                    self_consistency_score, tool_reward)
+from overview import equation  # noqa: E402
 
 
 def _load(name, path):
@@ -39,6 +41,7 @@ compute_grpo_outcome_advantage = grpo.compute_grpo_outcome_advantage
 compute_policy_loss = grpo.compute_policy_loss
 
 torch.manual_seed(0)
+
 
 # Five question templates. SOLVE_RATE is the ground truth the Curriculum Agent
 # is never shown -- it only ever sees the Executor's answers.
@@ -105,12 +108,17 @@ for step in range(60):
         rewards = []
         questions = [wording(template, generator) for template in flat.tolist()]
         shares = bleu_cluster_share(questions, distance_threshold=0.05)
+        worked = None
         for i, template in enumerate(flat.tolist()):
             answers = executor_attempts(template, generator)
             majority, raw = self_consistency_score(answers, default_equivalent)
             gated = gate_against_claim(majority, CLAIMED, raw, default_equivalent)
             text = transcript(template, generator)
             rewards.append(curriculum_reward(gated, True, shares[i], text))
+            if i == 0:                      # keep row 0 to show the arithmetic
+                worked = dict(answers=answers, majority=majority, raw=raw,
+                              gated=gated, share=shares[i], text=text,
+                              reward=rewards[0])
         rewards = torch.tensor(rewards)
         groups = torch.arange(slots).repeat_interleave(GROUP_SIZE)
         # verl shapes: the scalar reward goes in a (N, 1) token-level row, and
@@ -134,6 +142,33 @@ for step in range(60):
                          for name, p in zip(TEMPLATES, probabilities))
         print(f"{step:>5}{rewards.mean():>9.3f}   {bars}")
 
+# The arithmetic behind ONE of those rewards -- row 0 of the final step.
+counts = {}
+for a in worked["answers"]:
+    counts[a] = counts.get(a, 0) + 1
+top = max(counts.values())
+fences = worked["text"].count("```output")
+group0 = rewards[:GROUP_SIZE]
+mean0, std0 = float(group0.mean()), float(group0.std(unbiased=True))
+print("\nthe arithmetic behind one of those rewards (row 0, final step):\n")
+equation("p", "max_count / n_candidates",
+         f"{top} / {CANDIDATES}", f"{worked['raw']:.4f}")
+equation("gate", "p if (majority == claim and p > 0.1) else 0",
+         f"{worked['gated']:.4f}"
+         f"   [majority {worked['majority']!r}, claim {CLAIMED!r}]")
+equation("base", "min(p, 1 - p)",
+         f"min({worked['gated']:.4f}, {1 - worked['gated']:.4f})",
+         f"{min(worked['gated'], 1 - worked['gated']):.4f}")
+equation("tool", "min(output_fences, 4) * 0.05",
+         f"min({fences}, 4) * 0.05", f"{tool_reward(worked['text']):.4f}")
+equation("reward", "base - cluster_share + tool",
+         f"{min(worked['gated'], 1 - worked['gated']):.4f}"
+         f" - {worked['share']:.4f} + {tool_reward(worked['text']):.4f}",
+         f"{worked['reward']:.4f}")
+equation("A", "(reward - group_mean) / (group_std + 1e-6)",
+         f"({worked['reward']:.4f} - {mean0:.4f}) / ({std0:.4f} + 1e-6)",
+         f"{float(advantage[0, 0]):+.4f}")
+
 final = logits.softmax(-1).detach()
 print(f"\nmost-proposed template: {TEMPLATES[int(final.argmax())]}"
       f" (true solve rate {SOLVE_RATE[int(final.argmax())]:.2f})")
@@ -142,6 +177,7 @@ print("Nothing told it 0.5 was the target. min(p, 1-p) did.")
 print("\nSTEP 4 -- the trained Curriculum Agent curates a dataset")
 print("No gate here: the Executor's plurality BECOMES the label.\n")
 rows = []
+sample4 = None
 for _ in range(24):
     template = int(torch.multinomial(final, 1))
     answers = executor_attempts(template, generator, n=9)
@@ -149,6 +185,8 @@ for _ in range(24):
                                              denominator="valid")
     rows.append({"problem": wording(template, generator), "answer": majority,
                  "score": score, "template": template})
+    if sample4 is None:
+        sample4 = dict(answers=answers, majority=majority, score=score)
 
 kept = difficulty_filter(rows, min_score=0.3, max_score=0.8)
 print(f"generated {len(rows)} questions, kept {len(kept)} inside [0.3, 0.8]")
@@ -160,6 +198,20 @@ for row in rows:
 for name, (dropped, keeps) in histogram.items():
     print(f"  {name:<11} kept {keeps:>2}   dropped {dropped:>2}")
 print("Each kept row carries its score forward as ADPO's difficulty label.")
+
+valid = [a for a in sample4["answers"] if a]
+top4 = sum(1 for a in valid if a == sample4["majority"])
+print("\nthe arithmetic behind one of those scores (the first row):\n")
+equation("score", "max_count / n_that_ANSWERED",
+         f"{top4} / {len(valid)}", f"{sample4['score']:.4f}")
+if len(valid) == len(sample4["answers"]):
+    print(f"              (every attempt produced an answer here, so Step 3's")
+    print(f"               denominator would give the same {top4}/9. They diverge")
+    print(f"               only when an attempt returns no \\boxed{{}} at all --")
+    print(f"               see ./scripts/run_agent0.sh curriculum, section 2)")
+equation("keep?", "0.3 <= score <= 0.8",
+         f"0.3 <= {sample4['score']:.4f} <= 0.8",
+         "KEEP" if 0.3 <= sample4["score"] <= 0.8 else "DROP")
 
 print("\nSTEP 5 -- train the Executor on that dataset with ADPO")
 print("Reward is plain +1/-1; the difficulty label only scales the lesson.\n")
@@ -198,6 +250,26 @@ for step in range(25):
     executor_optimizer.zero_grad()
     loss.backward()
     executor_optimizer.step()
+
+d = float(scores[0])
+raw0, _ = adpo_advantage(torch.tensor([[1.0], [-1.0]]), torch.ones(2, 1),
+                         ["q", "q"], torch.tensor([d, d]),
+                         min_advantage_scale=1.0)
+print("\nthe arithmetic behind ADPO's two dials (first kept question):\n")
+equation("trust", "0.5 + clamp((d - 0.3) / (0.8 - 0.3), 0, 1) * 0.5",
+         f"0.5 + clamp(({d:.4f} - 0.3) / 0.5, 0, 1) * 0.5",
+         f"{float(adpo_trust_scale(torch.tensor(d))):.4f}")
+equation("A_raw", "(reward - group_mean) / (group_std + 1e-6)",
+         f"{float(raw0[0, 0]):+.4f}   [a +1 reward against a -1 sibling]")
+equation("A", "A_raw * trust",
+         f"{float(raw0[0, 0]):+.4f} * {float(adpo_trust_scale(torch.tensor(d))):.4f}",
+         f"{float(raw0[0, 0]) * float(adpo_trust_scale(torch.tensor(d))):+.4f}")
+equation("eps_high", "0.2 + clamp((0.8 - d) / (0.8 - 0.3), 0, 1) * 0.1",
+         f"0.2 + clamp((0.8 - {d:.4f}) / 0.5, 0, 1) * 0.1",
+         f"{float(adpo_clip_high(torch.tensor(d))):.4f}")
+equation("clip", "[1 - 0.2, 1 + eps_high]",
+         f"[0.8000, {1 + float(adpo_clip_high(torch.tensor(d))):.4f}]")
+print()
 
 probabilities = executor_logits.softmax(-1).detach()[:, RIGHT_APPROACH]
 buckets = {}
