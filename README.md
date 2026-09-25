@@ -14,7 +14,9 @@ paper.
 - `VPG/`: vanilla policy gradient, the PPO paper's Section 2.1, on a toy
   tool-calling bandit, and its flaw: the gradient is only valid where the batch
   was collected. The demo runs it with new rollouts for every update (correct,
-  but slow) beside reusing one batch (cheap, but it overshoots).
+  but slow) beside reusing one batch (cheap, but it overshoots). The terms its
+  logs use, the exercise, and how its advantage simplifies the paper's are in
+  `VPG/README.md`.
 - `PPO/`: masked statistics, GAE, the four `loss_agg_mode` reductions, dual-clip
   policy loss, clipped value loss, entropy, and four KL estimators.
 - `GRPO/`: group-relative outcome advantage, and the Dr.GRPO flag. Everything
@@ -34,36 +36,6 @@ without opening `common.py`.
 
 Order matters: **PPO first.** `GRPO/from_scratch/grpo.py` imports your
 `agg_loss`, `compute_policy_loss` and `kl_penalty` from `PPO/from_scratch/`.
-
-### Terms in the VPG logs
-
-The toy is a tool-calling agent: each question is HARD or EASY (50/50), and the
-policy either answers directly or calls a search tool. Average rewards:
-
-|      | answer | tool |
-|------|--------|------|
-| HARD | 0.2    | 1.0  |
-| EASY | 0.8    | 0.5  |
-
-- **p(tool|HARD)**: chance the policy calls the tool on a HARD question.
-  Ideal 1.0, since search helps there.
-- **p(tool|EASY)**: chance it calls the tool on an EASY question. Ideal 0.0,
-  since search wastes time there. Both start at 0.40; good training pushes HARD
-  up and EASY down.
-- **true J**: the policy's real score, its average reward over many questions.
-  Computed exactly from the table above, not estimated from noisy rollouts.
-  At the start, HARD earns 0.6×0.2 + 0.4×1.0 = 0.52 and EASY 0.6×0.8 + 0.4×0.5
-  = 0.68, so J = 0.60. The best possible (always search on HARD, always answer
-  on EASY) is J = (1.0 + 0.8) / 2 = 0.90.
-- **rollout**: one question, the action taken, and its noisy reward. The
-  expensive part. A **batch** is 16 rollouts collected by one model, **θ_old**.
-- **update**: one `optimizer.step()`, the only line that changes the model.
-  Only the first update on a batch is taken at θ_old, where the batch's gradient
-  is valid.
-- **epoch**: one full pass over the batch. These toys use the whole batch per
-  update, so 1 epoch = 1 update. Vanilla PG runs 1 epoch per batch; the VPG
-  demo's shortcut runs 100 epochs on one batch.
-- **iteration**: collect a fresh batch, then run all its epochs on it.
 
 ## Running it
 

@@ -78,11 +78,35 @@ def expected_reward(probs):
 
 
 def compute_advantage(reward):
-    """Advantage A_t: was this rollout better (+) or worse (-) than the batch average?
+    """Advantage A_t: was this rollout better (+) or worse (-) than expected?
 
-    The batch mean is the simplest baseline. Without it every reward in this toy
-    is mostly positive, so every action taken would be pushed up; subtracting
-    the mean makes the update ask "better than usual?" instead of "good at all?".
+        A_t = r_t - mean(r)            (the batch mean is the baseline)
+
+    Where this formula comes from. The PPO paper's Section 2 never defines A_t --
+    eq. 1-5 only call it "an estimator of the advantage function". It defines one
+    later, in Section 5 (eq. 10-12), using a learned value network V(s) (the
+    critic), which predicts how much reward to expect from state s:
+
+        A_t     = delta_t + (gamma*lambda) delta_{t+1} + ...             (eq. 11, GAE)
+        delta_t = r_t + gamma * V(s_{t+1}) - V(s_t)                      (eq. 12)
+
+    This toy is the simplest special case, in two steps:
+      1. every question is ONE step: one action, one reward, done. There is no
+         s_{t+1}, so V(s_{t+1}) = 0 and eq. 11 collapses to  A_t = r_t - V(s_t).
+      2. there is no value network, so the batch's average reward stands in for
+         V(s_t):  A_t = r_t - mean(r).
+    That is "REINFORCE with a baseline" (Williams, 1992), older than PPO. PPO/
+    implements the full eq. 11-12 as compute_gae_advantage_return.
+
+    Why subtract a baseline at all: rewards in this toy are mostly positive, so
+    without it every action taken would be pushed up. Subtracting the mean makes
+    the update ask "better than usual?" instead of "good at all?".
+
+    One simplification: a single mean for the whole batch ignores the question
+    type, where a real V(s) would expect about 0.52 on HARD and 0.68 on EASY at
+    the start. The gradient is still right on average (a baseline that does not
+    depend on the action never biases it), but noisier -- one reason a 16-rollout
+    batch can mislead, as the seed-17 batch does.
     """
     return reward - reward.mean()
 
