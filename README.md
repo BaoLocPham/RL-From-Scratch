@@ -17,6 +17,11 @@ paper.
   but slow) beside reusing one batch (cheap, but it overshoots). The terms its
   logs use, the exercise, and how its advantage simplifies the paper's are in
   `VPG/README.md`.
+- `TRPO/`: TRPO, the PPO paper's Section 2.2, on the same toy. Eq. 3's ratio
+  lets one batch be used for several updates, and eq. 4's KL fence stops them
+  before the policy drifts too far. The demo runs it against vanilla PG with
+  one epoch per batch (slow) and with 50 epochs and no fence (overshoots). Its
+  own flaw: the fence sits outside the loss. A demo only, no exercise.
 - `PPO/`: masked statistics, GAE, the four `loss_agg_mode` reductions, dual-clip
   policy loss, clipped value loss, entropy, and four KL estimators.
 - `GRPO/`: group-relative outcome advantage, and the Dr.GRPO flag. Everything
@@ -44,6 +49,7 @@ pip install -r requirements.txt
 
 ./scripts/run_vpg.sh run        # VPG: new rollouts every update vs reusing one batch
 ./scripts/run_vpg.sh steps      # VPG walkthrough; check / scratch / diff work as for PPO
+./scripts/run_trpo.sh run       # TRPO vs VPG: safe reuse, fence outside the loss
 ./scripts/run_ppo.sh            # list the commands
 ./scripts/run_ppo.sh check      # grade your from_scratch implementation
 ./scripts/run_ppo.sh steps      # the walkthrough
@@ -67,6 +73,7 @@ Or call the files directly:
 
 ```bash
 python VPG/steps_vpg.py      python VPG/run_vpg.py      python VPG/from_scratch/check.py
+python TRPO/run_trpo.py
 python PPO/steps_ppo.py      python PPO/run_ppo.py      python PPO/from_scratch/check.py
 python GRPO/steps_grpo.py    python GRPO/run_grpo.py    python GRPO/from_scratch/check.py
 python Agent0/steps_agent0.py python Agent0/run_agent0.py python Agent0/from_scratch/check.py
