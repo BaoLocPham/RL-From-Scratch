@@ -2,8 +2,8 @@
 #
 # Run one module.  ./scripts/run_agent0.sh <command>
 #
-# Sibling links scripts/run_ppo.sh and scripts/run_grpo.sh drive PPO and GRPO;
-# the module is taken from this script's own filename.
+# Sibling links drive the other modules; the module is taken from this script's
+# own filename: run_vpg.sh -> VPG, run_ppo.sh -> PPO, run_grpo.sh -> GRPO.
 #
 #   check     grade the module's from_scratch exercise, stopping at the first gap
 #   steps     the walkthrough, against the reference implementation
@@ -28,12 +28,13 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-# run_agent0.sh -> Agent0, run_ppo.sh -> PPO, run_grpo.sh -> GRPO
+# run_agent0.sh -> Agent0, run_ppo.sh -> PPO, run_vpg.sh -> VPG, ...
 STEM="$(basename "${BASH_SOURCE[0]}" .sh)"; STEM="${STEM#run_}"
 case "$STEM" in
-    agent0) MODULE=Agent0 ;;
-    ppo)    MODULE=PPO ;;
-    grpo)   MODULE=GRPO ;;
+    agent0)  MODULE=Agent0 ;;
+    ppo)     MODULE=PPO ;;
+    grpo)    MODULE=GRPO ;;
+    vpg)     MODULE=VPG ;;
     *)      echo "unknown module: $STEM" >&2; exit 1 ;;
 esac
 
@@ -44,7 +45,8 @@ if [ -z "$PYTHON" ]; then
 fi
 
 usage() {
-    sed -n '3,24p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    # the comment block at the top of this file, from line 3 to the first non-comment line
+    awk 'NR < 3 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' "${BASH_SOURCE[0]}"
 }
 
 banner() {
@@ -108,7 +110,7 @@ cmd_diff() {
     "$PYTHON" "$MODULE/steps_$STEM.py" > "$reference"
     RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py" > "$mine"
     if diff -u "$reference" "$mine"; then
-        echo "identical -- your implementation is indistinguishable from common.py"
+        echo "identical -- your implementation is indistinguishable from the reference"
     else
         echo "the two differ; the lines above are reference vs yours" >&2
         return 1
