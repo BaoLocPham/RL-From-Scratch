@@ -204,9 +204,11 @@ def print_terms():
                   best:  always search on HARD, always answer on EASY
                          J = (1.0 + 0.8) / 2 = 0.90
   rollout       one question + the action taken + its (noisy) reward. The expensive part.
-  batch         16 rollouts, all collected by the same model: theta_old.
+  batch         the 16 rollouts one iteration collects, all by the same model: theta_old.
+                (The PPO paper's sense, "a finite batch of samples" -- not a minibatch.)
   update        one optimizer.step(): the only line that changes the model.
-  epoch         one full pass over the batch. Here each update uses the whole batch,
-                so 1 epoch = 1 update.
-  iteration     collect a fresh batch, then run all its epochs on it.
+  epoch         one pass over this iteration's 16 rollouts. PPO splits each epoch into
+                minibatches, one update each; these toys use no minibatches (every
+                update uses all 16), so 1 epoch = 1 update. Vanilla PG: 1 epoch per iteration.
+  iteration     collect 16 new rollouts, then run all its epochs on them.
 """)
