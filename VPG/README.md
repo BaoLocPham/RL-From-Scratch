@@ -59,16 +59,23 @@ policy either answers directly or calls a search tool. Average rewards:
   = 0.68, so J = 0.60. The best possible (always search on HARD, always answer
   on EASY) is J = (1.0 + 0.8) / 2 = 0.90.
 - **rollout**: one question, the action taken, and its noisy reward. The
-  expensive part. A **batch** is 16 rollouts collected by one model, **θ_old**.
+  expensive part. A **batch** is the 16 rollouts one iteration collects, all by
+  one model, **θ_old** (the PPO paper's sense, "a finite batch of samples", not
+  a minibatch).
 - **advantage** Â: reward − mean(reward), "better or worse than usual?". A
   simplified version of the paper's; see *A simplification: the advantage* below.
 - **update**: one `optimizer.step()`, the only line that changes the model.
   Only the first update on a batch is taken at θ_old, where the batch's gradient
   is valid.
-- **epoch**: one full pass over the batch. These toys use the whole batch per
-  update, so 1 epoch = 1 update. Vanilla PG runs 1 epoch per batch; the VPG
-  demo's shortcut runs 100 epochs on one batch.
-- **iteration**: collect a fresh batch, then run all its epochs on it.
+- **epoch**: one pass over the current iteration's 16 rollouts. This is the
+  reverse of the usual supervised-ML picture, where a batch is a small slice of
+  an epoch: here the batch is everything one iteration collected, and every
+  epoch passes over all of it. PPO splits each epoch into minibatches, one
+  update each (the paper's "K epochs and minibatch size M"). These toys use no
+  minibatches, so every update uses all 16 rollouts and 1 epoch = 1 update.
+  Vanilla PG runs 1 epoch per iteration; the VPG demo's shortcut runs 100
+  epochs on one iteration's rollouts.
+- **iteration**: collect 16 new rollouts, then run all its epochs on them.
 
 ## A simplification: the advantage
 

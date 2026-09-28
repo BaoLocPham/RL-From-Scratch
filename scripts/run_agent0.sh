@@ -3,7 +3,8 @@
 # Run one module.  ./scripts/run_agent0.sh <command>
 #
 # Sibling links drive the other modules; the module is taken from this script's
-# own filename: run_vpg.sh -> VPG, run_ppo.sh -> PPO, run_grpo.sh -> GRPO.
+# own filename: run_vpg.sh -> VPG, run_trpo.sh -> TRPO, run_ppo.sh -> PPO,
+# run_grpo.sh -> GRPO.
 #
 #   check     grade the module's from_scratch exercise, stopping at the first gap
 #   steps     the walkthrough, against the reference implementation
@@ -11,6 +12,8 @@
 #   run       the runnable demonstration
 #   diff      prove your implementation matches: check, then steps vs scratch
 #   all       check, steps, run
+#
+# TRPO is a demo only (no exercise, no walkthrough): use 'run'.
 #
 # Agent0 only, since it alone trains two agents with two algorithms:
 #
@@ -35,6 +38,7 @@ case "$STEM" in
     ppo)     MODULE=PPO ;;
     grpo)    MODULE=GRPO ;;
     vpg)     MODULE=VPG ;;
+    trpo)    MODULE=TRPO ;;
     *)      echo "unknown module: $STEM" >&2; exit 1 ;;
 esac
 
@@ -53,17 +57,31 @@ banner() {
     printf '\n\033[1m== %s\033[0m\n' "$1"
 }
 
+has_exercise() {
+    [ -f "$MODULE/from_scratch/check.py" ]
+}
+
+need_exercise() {
+    if ! has_exercise; then
+        echo "$MODULE has no from_scratch exercise or walkthrough; use 'run'" >&2
+        return 1
+    fi
+}
+
 cmd_check() {
+    need_exercise
     banner "grading $MODULE/from_scratch/$STEM.py"
     "$PYTHON" "$MODULE/from_scratch/check.py"
 }
 
 cmd_steps() {
+    need_exercise
     banner "walkthrough (reference implementation)"
     "$PYTHON" "$MODULE/steps_$STEM.py"
 }
 
 cmd_scratch() {
+    need_exercise
     banner "walkthrough (your implementation)"
     RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py"
 }
@@ -118,8 +136,10 @@ cmd_diff() {
 }
 
 cmd_all() {
-    cmd_check
-    cmd_steps
+    if has_exercise; then
+        cmd_check
+        cmd_steps
+    fi
     cmd_run
 }
 
