@@ -84,3 +84,9 @@ the loss with a clip.
 - Why must `before` be `.detach().clone()` and not just `.detach()`?
 - In stage 4, TRPO still moved J the wrong way (0.600 → 0.559). What limits the
   damage, and what actually repairs it?
+
+## Next
+
+`Surrogates/` puts TRPO beside the other candidates for the same loop: no
+limit at all, a fixed or adaptive KL penalty, and the clip. TRPO is the only
+one that needs to change the loop itself, not just the loss.
