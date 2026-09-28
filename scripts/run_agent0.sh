@@ -3,8 +3,8 @@
 # Run one module.  ./scripts/run_agent0.sh <command>
 #
 # Sibling links drive the other modules; the module is taken from this script's
-# own filename: run_vpg.sh -> VPG, run_trpo.sh -> TRPO, run_ppo.sh -> PPO,
-# run_grpo.sh -> GRPO.
+# own filename: run_vpg.sh -> VPG, run_trpo.sh -> TRPO, run_compare.sh ->
+# Comparison (VPG vs TRPO vs PPO), run_ppo.sh -> PPO, run_grpo.sh -> GRPO.
 #
 #   check     grade the module's from_scratch exercise, stopping at the first gap
 #   steps     the walkthrough, against the reference implementation
@@ -13,7 +13,7 @@
 #   diff      prove your implementation matches: check, then steps vs scratch
 #   all       check, steps, run
 #
-# TRPO is a demo only (no exercise, no walkthrough): use 'run'.
+# Comparison is a demo only (no exercise, no walkthrough): use 'run'.
 #
 # Agent0 only, since it alone trains two agents with two algorithms:
 #
@@ -39,6 +39,7 @@ case "$STEM" in
     grpo)    MODULE=GRPO ;;
     vpg)     MODULE=VPG ;;
     trpo)    MODULE=TRPO ;;
+    compare) MODULE=Comparison ;;
     *)      echo "unknown module: $STEM" >&2; exit 1 ;;
 esac
 
