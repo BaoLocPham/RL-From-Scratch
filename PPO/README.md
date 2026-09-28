@@ -1,7 +1,8 @@
 # Build PPO from scratch: the paper first, then verl
 
 Do not open `common.py` (the reference) before you finish the exercise. Work
-from the docstrings in `from_scratch/ppo.py` and the grader's messages.
+from the docstrings in `from_scratch/ppo.py` (Part 1) and
+`from_scratch/ppo_verl.py` (Part 2), and the grader's messages.
 
 `Surrogates/` ended with a definition: **PPO = the loop with L^CLIP in the
 slot, plus a value loss, an entropy bonus and GAE.** This module builds exactly
@@ -11,9 +12,10 @@ that list, then the loop, at an LLM's shapes: the paper's §5, eq. 9
 L^{CLIP+VF+S}(θ) = Ê_t[ L^CLIP_t − c1 · L^VF_t + c2 · S[π_θ](s_t) ]
 ```
 
-in two parts. **Part 1 is PPO itself** (the paper, stages 1–6) and ends with
-your code training a model. **Part 2 is what verl adds for production**
-(stages 7–12): for later, but before GRPO.
+in two parts, one file each. **Part 1, `from_scratch/ppo.py`, is PPO itself**
+(the paper, stages 1–6) and ends with your code training a model. **Part 2,
+`from_scratch/ppo_verl.py`, is what verl adds for production** (stages 7–12):
+for later, but before GRPO. It imports your Part 1 functions and builds on them.
 
 ## The whole picture
 
@@ -21,7 +23,7 @@ Algorithm 1, with the stage that builds each line. The right-hand column is
 what Part 2 adds to the same line; the loop itself never changes.
 
 ```
-                                                  PART 1: core PPO (stage)          PART 2: verl adds (stage)
+                                                  PART 1: ppo.py (stage)            PART 2: ppo_verl.py adds (stage)
 for iteration:
     batch = rollout(model)                        given, task.py
         tokens, response_mask, old_log_prob,        uses your logprobs_from_logits (1)
@@ -49,7 +51,8 @@ same loop without the critic) → `Agent0/`.
 
 | File | What it is | Yours to edit? |
 |---|---|---|
-| `from_scratch/ppo.py` | the exercise: 12 stages of TODOs, worked examples, and a playground (`python PPO/from_scratch/ppo.py`) | **yes** |
+| `from_scratch/ppo.py` | Part 1, core PPO: stages 1–6 of TODOs, worked examples, and a playground (`python PPO/from_scratch/ppo.py`) | **yes** |
+| `from_scratch/ppo_verl.py` | Part 2, verl's extras: stages 7–12, built on your Part 1, with its own playground | **yes**, later |
 | `from_scratch/check.py` | the grader: stages in order, stops at the first gap, with a hint | no |
 | `task.py` | the token task: the model, `rollout`, and `train`, the outer loop | no, read it |
 | `steps_ppo.py` | the walkthrough: every equation with its numbers substituted | no |
@@ -60,7 +63,8 @@ same loop without the critic) → `Agent0/`.
 
 | Command | Does |
 |---|---|
-| `python PPO/from_scratch/ppo.py` | your value for every stage next to the expected one |
+| `python PPO/from_scratch/ppo.py` | your value for every Part 1 stage next to the expected one |
+| `python PPO/from_scratch/ppo_verl.py` | the same for Part 2 |
 | `./scripts/run_ppo.sh check core` | grade Part 1 (stages 1–6) |
 | `./scripts/run_ppo.sh steps core` | the Part 1 walkthrough, reference implementation |
 | `./scripts/run_ppo.sh diff core` | grade Part 1, then prove your walkthrough matches the reference line for line |
@@ -80,10 +84,11 @@ same loop without the critic) → `Agent0/`.
 | 5 | `entropy_from_logits`, `entropy_bonus` | eq. 9's S | Why is a bonus subtracted from the loss? |
 | 6 | `compute_advantage`, `ppo_update` | Algorithm 1, eq. 9 | Can your pieces train something? |
 
-### Part 2, verl's extras (stages 7–12), for later
+### Part 2, verl's extras (stages 7–12, `ppo_verl.py`), for later
 
 Each verl function is your Part 1 version plus one idea, and the Part 1 lines
-come filled in.
+come filled in. The file imports your `masked_mean`, `compute_gae`,
+`entropy_from_logits` and `logprobs_from_logits` from `ppo.py`.
 
 | Stage | You build | Adds | Why production wants it |
 |---|---|---|---|
@@ -96,7 +101,8 @@ come filled in.
 
 Finish `VPG/`, `TRPO/` and `Surrogates/` first: stage 3 is your Surrogates
 clip, per token. `GRPO/from_scratch/` imports your `agg_loss`,
-`compute_policy_loss`, `kl_penalty` and `masked_mean`, so it needs Part 2.
+`compute_policy_loss`, `kl_penalty` and `masked_mean` from `ppo_verl.py`, so it
+needs Part 2.
 
 ## How to start
 
@@ -114,7 +120,9 @@ each stage is heading.
      the reference line for line;
    - `RL_IMPL=scratch ./scripts/run_ppo.sh run` trains the token task with your code.
 
-For Part 2 later, drop the `core`: `check`, `diff`, and `run verl`.
+For Part 2 later, open `from_scratch/ppo_verl.py`, try it with
+`python PPO/from_scratch/ppo_verl.py`, and drop the `core`: `check`, `diff`, and
+`run verl`.
 
 ## The token task (`task.py`, given)
 

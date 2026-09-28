@@ -84,9 +84,9 @@ def train(impl, verl=False, iterations=40, batch_size=32, lr=0.02, seed=0, every
     """Algorithm 1, outer loop: collect -> compute_advantage -> ppo_update, `iterations` times.
 
     `impl` is a module: the reference (PPO/common.py) or yours
-    (PPO/from_scratch/ppo.py). verl=False runs core PPO (compute_advantage,
-    ppo_update); verl=True runs the same loop with verl's functions
-    (verl_compute_advantage, verl_ppo_update). Returns one row of metrics per
+    (PPO/from_scratch/ppo.py, or ppo_verl.py for verl=True). verl=False runs core
+    PPO (compute_advantage, ppo_update); verl=True runs the same loop with verl's
+    functions (verl_compute_advantage, verl_ppo_update). Returns one row of metrics per
     iteration, and the model.
     """
     advantage = impl.verl_compute_advantage if verl else impl.compute_advantage

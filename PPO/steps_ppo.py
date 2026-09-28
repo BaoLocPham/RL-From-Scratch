@@ -3,7 +3,7 @@
 Part 1 is core PPO, the paper's eq. 9 and Algorithm 1 (stages 1-6). Part 2 is
 what verl adds on top (stages 7-12). Every equation is printed with the numbers
 substituted into it. Set ``RL_IMPL=scratch`` to run the same walkthrough on
-your PPO/from_scratch/ppo.py, and ``./scripts/run_ppo.sh diff core`` to compare
+your PPO/from_scratch/ppo.py (and ppo_verl.py for Part 2), and ``./scripts/run_ppo.sh diff core`` to compare
 Part 1 with the reference line by line (``diff`` alone compares both parts).
 """
 
@@ -17,9 +17,10 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))                          # task.py, always given
 if os.getenv("RL_IMPL") == "scratch":
     sys.path.insert(0, str(HERE / "from_scratch"))
-    import ppo as impl                                 # your implementation
+    import ppo as impl                                 # your Part 1
 else:
     import common as impl                              # the reference
+    vimpl = impl
 import task  # noqa: E402
 
 CORE_ONLY = "core" in sys.argv[1:]
@@ -35,7 +36,7 @@ def f(x):
 
 
 def run(verl):
-    history, model = task.train(impl, verl=verl)
+    history, model = task.train(vimpl if verl else impl, verl=verl)
     print("  " + task.header(verl))
     for i in (0, 5, 10, 20, 39):
         print("  " + task.row(i, history[i]))
@@ -134,15 +135,17 @@ print("  That is core PPO.")
 
 if CORE_ONLY:
     raise SystemExit(0)
+if os.getenv("RL_IMPL") == "scratch":
+    import ppo_verl as vimpl                           # your Part 2, imported only when it is needed
 
 print("\n\nPART 2 -- verl's extras: what production adds on top of eq. 9")
 
 # ---------------------------------------------------------------- stage 7
 banner("STAGE 7  whitening: advantages rescaled to mean 0, spread 1, over the mask")
 print("  values [1, 2, 3, 100], mask [1, 1, 1, 0]")
-print(f"  masked_var  = mean(1, 0, 1) * 3/2 = {f(impl.masked_var(spread, mask4)):.4f}   (n/(n-1), n = real positions)")
-print(f"  masked_whiten -> {[f(v) for v in impl.masked_whiten(spread, mask4)[0, :3]]}")
-advantages, returns = impl.compute_gae_advantage_return(R, V, M, gamma, lam)
+print(f"  masked_var  = mean(1, 0, 1) * 3/2 = {f(vimpl.masked_var(spread, mask4)):.4f}   (n/(n-1), n = real positions)")
+print(f"  masked_whiten -> {[f(v) for v in vimpl.masked_whiten(spread, mask4)[0, :3]]}")
+advantages, returns = vimpl.compute_gae_advantage_return(R, V, M, gamma, lam)
 print(f"  verl's GAE, row 0: advantages {[f(v) for v in advantages[0, :3]]} (whitened), returns "
       f"{[f(v) for v in returns[0, :3]]} (untouched)")
 print("  Why: without it the policy's step size follows the reward's scale.")
@@ -153,30 +156,30 @@ loss = torch.tensor([[1., 2., 3., 100.], [4., 5., 100., 100.]])
 print("  loss [[1, 2, 3, pad], [4, 5, pad, pad]]: responses of length 3 and 2, width 4")
 for mode, how in (("token-mean", "(1+2+3+4+5) / 5"), ("seq-mean-token-sum", "(6 + 9) / 2"),
                   ("seq-mean-token-mean", "(6/3 + 9/2) / 2"), ("seq-mean-token-sum-norm", "(6 + 9) / 4")):
-    print(f"  {mode:<24} {how:<18} = {f(impl.agg_loss(loss, M, mode)):.4f}")
+    print(f"  {mode:<24} {how:<18} = {f(vimpl.agg_loss(loss, M, mode)):.4f}")
 print("  Core PPO's token-mean lets the longer response count for more; seq-mean-token-mean makes")
 print("  length irrelevant; sum-norm divides by a constant (Dr.GRPO).")
 
 # ---------------------------------------------------------------- stage 9
 banner("STAGE 9  verl's policy loss: asymmetric range, dual clip, and metrics")
-out = impl.compute_policy_loss(torch.zeros(1, 1), torch.tensor([[3.5]]).log(), -one, one, cliprange=0.2)[0]
+out = vimpl.compute_policy_loss(torch.zeros(1, 1), torch.tensor([[3.5]]).log(), -one, one, cliprange=0.2)[0]
 print(f"  one token A = -1, r = 3.5: core clip max(3.5, 1.2) = 3.5; dual clip min(3.5, 3.0) = {f(out):.4f}")
 old = torch.zeros(2, 4)
 logp = torch.tensor([[0.1, -0.1, 0.3, 0.], [0.8, 0.9, 0., 0.]])
 adv = torch.tensor([[1., 1., 1., 0.], [-1., -1., 0., 0.]])
 for c in (3.0, 1.5):
-    pg, clipfrac, ppo_kl, lower = impl.compute_policy_loss(old, logp, adv, M, cliprange=0.2, clip_ratio_c=c)
+    pg, clipfrac, ppo_kl, lower = vimpl.compute_policy_loss(old, logp, adv, M, cliprange=0.2, clip_ratio_c=c)
     print(f"  batch, clip_ratio_c {c}: pg_loss {f(pg):+.4f}  clipfrac {f(clipfrac):.2f}  ppo_kl {f(ppo_kl):+.4f}"
           f"  clipfrac_lower {f(lower):.2f}")
 for low, high in ((0.2, 0.2), (0.2, 0.3)):
-    pg = impl.compute_policy_loss(old, logp, adv, M, cliprange=0.2, cliprange_low=low, cliprange_high=high)[0]
+    pg = vimpl.compute_policy_loss(old, logp, adv, M, cliprange=0.2, cliprange_low=low, cliprange_high=high)[0]
     print(f"  range [1-{low}, 1+{high}]: pg_loss {f(pg):+.4f}")
 print("  clipfrac and ppo_kl are how you read whether the policy moves too fast; ppo_kl is the k1")
 print("  estimate of TRPO's exact mean_kl.")
 
 # ---------------------------------------------------------------- stage 10
 banner("STAGE 10  verl's value loss: clipped around the critic's OLD prediction")
-vf, _ = impl.compute_value_loss(torch.tensor([[0.2]]), torch.tensor([[0.75]]), torch.tensor([[0.1]]), one, 0.05)
+vf, _ = vimpl.compute_value_loss(torch.tensor([[0.2]]), torch.tensor([[0.75]]), torch.tensor([[0.1]]), one, 0.05)
 print("  one token: old 0.1, target 0.75, new 0.2, cliprange 0.05 -> clipped prediction 0.15")
 print(f"  max((0.2 - 0.75)^2, (0.15 - 0.75)^2) = 0.36 -> 0.5 * 0.36 = {f(vf):.4f}   (core: 0.15125)")
 
@@ -187,10 +190,10 @@ print("  the model BEFORE RL, so the policy cannot drift into text that games th
 logprob, ref = torch.tensor([[-1.0, -0.5, -2.0]]), torch.tensor([[-1.2, -0.4, -1.0]])
 print("  logprob [-1.0, -0.5, -2.0], ref [-1.2, -0.4, -1.0], r = logprob - ref = [0.2, -0.1, -1.0]")
 for kind in ("k1", "abs", "k2", "k3"):
-    row = impl.kl_penalty(logprob, ref, kind)
+    row = vimpl.kl_penalty(logprob, ref, kind)
     flag = "" if bool((row >= 0).all()) else "   <- negative on a real token"
     print(f"  {kind:<4} {[f(v) for v in row[0]]}{flag}")
-scored = impl.compute_rewards(torch.tensor([[0., 0., 1.]]), torch.zeros(1, 3), torch.full((1, 3), -0.1), 0.2)
+scored = vimpl.compute_rewards(torch.tensor([[0., 0., 1.]]), torch.zeros(1, 3), torch.full((1, 3), -0.1), 0.2)
 print(f"  compute_rewards: score [0, 0, 1] - 0.2 * (0 - (-0.1)) -> {[f(v) for v in scored[0]]}")
 
 # ---------------------------------------------------------------- stage 12

@@ -6,7 +6,8 @@ the exercise. With ``verl``, the same loop is then run with verl's functions
 (Part 2): whitened advantages, clipped critic, dual clip, and a KL to a frozen
 reference folded into the reward.
 
-``RL_IMPL=scratch`` runs your PPO/from_scratch/ppo.py instead of the reference.
+``RL_IMPL=scratch`` runs your PPO/from_scratch/ppo.py (and ppo_verl.py, with ``verl``) instead
+of the reference.
 """
 
 import os
@@ -19,7 +20,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 if os.getenv("RL_IMPL") == "scratch":
     sys.path.insert(0, str(HERE / "from_scratch"))
-    import ppo as impl                                 # your implementation
+    import ppo as impl                                 # your Part 1
 else:
     import common as impl                              # the reference
 import task  # noqa: E402
@@ -56,7 +57,8 @@ It predicts the final reward from each position: close to 1 once the policy is r
 
     if WITH_VERL:
         print("\nThe same loop with verl's functions (Part 2 of the exercise):\n")
-        task.train(impl, verl=True, every=5)
+        vimpl = __import__("ppo_verl") if os.getenv("RL_IMPL") == "scratch" else impl   # your Part 2
+        task.train(vimpl, verl=True, every=5)
         print("""
   clipfrac  share of tokens the clip is holding back: largest early, while the policy moves fast.
   ppo_kl    mean(old_log_prob - log_prob): how far each update moved from theta_old, estimated

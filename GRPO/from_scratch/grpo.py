@@ -2,9 +2,9 @@
 
 GRPO's own contribution is one function. Everything else it needs --
 ``agg_loss``, ``compute_policy_loss``, ``kl_penalty`` -- is PPO's, and in verl
-lives in the same ``core_algos.py``. Build those in ``PPO/from_scratch/`` first;
-this exercise imports your versions, so ``PPO/from_scratch/check.py`` has to
-pass before this one will.
+lives in the same ``core_algos.py``. Build those in ``PPO/from_scratch/`` first
+-- they are Part 2, ``ppo_verl.py`` -- because this exercise imports your
+versions, so ``./scripts/run_ppo.sh check`` has to pass before this one will.
 
 The idea: PPO trains a critic to predict expected reward and subtracts it.
 GRPO samples several responses to the same prompt and subtracts their own mean.
@@ -18,7 +18,7 @@ from pathlib import Path
 import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "PPO" / "from_scratch"))
-from ppo import agg_loss, compute_policy_loss, kl_penalty, masked_mean  # noqa: F401,E402
+from ppo_verl import agg_loss, compute_policy_loss, kl_penalty, masked_mean  # noqa: F401,E402
 
 
 # ============================================================ STAGE 1
