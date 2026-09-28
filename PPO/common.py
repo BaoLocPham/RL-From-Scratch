@@ -74,6 +74,19 @@ def clip_by_value(x, tensor_min, tensor_max):
     return torch.max(torch.min(x, tensor_max), tensor_min)
 
 
+def logprobs_from_logits(logits, labels):
+    """log pi(label) at every position: ``(bs, len, vocab)`` logits -> ``(bs, len)``.
+
+    verl's ``logprobs_from_logits`` (its plain version; the fused one computes
+    the same numbers with less memory). ``log_softmax`` over the vocabulary,
+    then ``gather`` picks the log-probability of the token that was actually
+    sampled at each position. The toy track's ``policy.dist(qtype).log_prob(action)``
+    is this with one position and a vocabulary of two.
+    """
+    logp = F.log_softmax(logits, dim=-1)
+    return logp.gather(-1, labels.unsqueeze(-1)).squeeze(-1)
+
+
 def entropy_from_logits(logits):
     """Per-position categorical entropy, in a numerically stable form.
 
@@ -302,3 +315,61 @@ def compute_rewards(token_level_scores, old_log_prob, ref_log_prob, kl_ratio):
     """
     kl = old_log_prob - ref_log_prob
     return token_level_scores - kl * kl_ratio
+
+
+# ------------------------------------------------------------ the trainer loop
+# In verl these live in the trainer, not core_algos: ray_trainer.compute_advantage,
+# then dp_actor.update_policy and dp_critic.update_critic (separate models and
+# optimizers). The toy keeps actor and critic in one model and trains them with
+# one loss, the paper's eq. 9.
+
+
+def compute_advantage(batch, kl_ratio=0.02, gamma=1.0, lam=0.95):
+    """Between collecting and updating: fold the KL into the reward, then run GAE. Once per batch.
+
+    Adds ``token_level_rewards``, ``advantages`` and ``returns`` to ``batch``.
+    Advantages are computed ONCE, from the critic as it was at collection time,
+    and stay fixed through every epoch that follows -- the same rule as the toy
+    track's ``advantage``.
+    """
+    batch["token_level_rewards"] = compute_rewards(batch["token_level_scores"], batch["old_log_prob"],
+                                                   batch["ref_log_prob"], kl_ratio)
+    batch["advantages"], batch["returns"] = compute_gae_advantage_return(
+        batch["token_level_rewards"], batch["values"], batch["response_mask"], gamma, lam)
+    return batch
+
+
+def ppo_update(model, optimizer, batch, epochs=4, minibatch_size=8, cliprange=0.2,
+               cliprange_value=0.2, vf_coef=0.5, entropy_coeff=0.01):
+    """Algorithm 1's inner loop: ``epochs`` passes over ONE batch, in minibatches, on eq. 9.
+
+        loss = L^CLIP_loss + vf_coef * L^VF - entropy_coeff * S        (eq. 9, negated for descent)
+
+    Returns each metric averaged over every update, as floats.
+    """
+    n = batch["tokens"].shape[0]
+    totals, updates = {}, 0
+    for _ in range(epochs):
+        order = torch.randperm(n)                                   # a new shuffle every epoch
+        for start in range(0, n, minibatch_size):
+            mb = {key: value[order[start:start + minibatch_size]] for key, value in batch.items()}
+            m, mask = mb["tokens"].shape[0], mb["response_mask"]
+            logits = model.logits(m)                                # the forward pass
+
+            log_prob = logprobs_from_logits(logits, mb["tokens"])
+            pg_loss, pg_clipfrac, ppo_kl, _ = compute_policy_loss(
+                mb["old_log_prob"], log_prob, mb["advantages"], mask, cliprange=cliprange)
+            vf_loss, _ = compute_value_loss(model.values(m), mb["returns"], mb["values"], mask,
+                                            cliprange_value)
+            entropy = compute_entropy_loss(logits, mask)
+            loss = pg_loss + vf_coef * vf_loss - entropy_coeff * entropy
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            updates += 1                                            # bookkeeping for the log
+            for name, value in (("pg_loss", pg_loss), ("vf_loss", vf_loss), ("entropy", entropy),
+                                ("pg_clipfrac", pg_clipfrac), ("ppo_kl", ppo_kl)):
+                totals[name] = totals.get(name, 0.0) + float(value.detach())
+    return {name: total / updates for name, total in totals.items()}
