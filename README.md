@@ -11,18 +11,13 @@ trainer unchanged. The production systems add distributed workers, vLLM,
 sandboxes and Ray; this repo keeps only the mechanisms worth understanding on
 paper.
 
-- `VPG/`: vanilla policy gradient, the PPO paper's Section 2.1, on a toy
-  tool-calling bandit, and its flaw: the gradient is only valid where the batch
-  was collected. The demo runs it with new rollouts for every update (correct,
-  but slow) beside reusing one batch (cheap, but it overshoots). The terms its
-  logs use, the exercise, and how its advantage simplifies the paper's are in
-  `VPG/README.md`.
-- `TRPO/`: TRPO, the PPO paper's Section 2.2, on the same toy. Eq. 3's ratio
-  lets one iteration's rollouts be used for several epochs, and eq. 4's KL
-  constraint stops them before the policy drifts too far. The demo runs it
-  against vanilla PG with 1 epoch per iteration (slow) and with 50 epochs per
-  iteration and no constraint (overshoots). Its own flaw: the KL constraint
-  sits outside the loss. A demo only, no exercise.
+- `VPG/`, `TRPO/`, `Comparison/`: the PPO paper's Section 2 on a toy
+  tool-calling bandit. Vanilla policy gradient's flaw (the gradient is only
+  valid where the batch was collected), TRPO's fix and its own flaw (a KL constraint
+  that sits outside the loss), and a side-by-side run of VPG, TRPO
+  and PPO on the same rollout budget. `VPG/from_scratch/` and
+  `TRPO/from_scratch/` are staged exercises; the comparison is a demo only.
+  The terms the logs use are in `VPG/README.md` and `TRPO/README.md`.
 - `PPO/`: masked statistics, GAE, the four `loss_agg_mode` reductions, dual-clip
   policy loss, clipped value loss, entropy, and four KL estimators.
 - `GRPO/`: group-relative outcome advantage, and the Dr.GRPO flag. Everything
@@ -40,8 +35,9 @@ walkthrough (`steps_*.py`), a runnable demonstration (`run_*.py`), and a staged
 exercise under `from_scratch/`. Start in that order, but solve the exercise
 without opening `common.py`.
 
-Order matters: **PPO first.** `GRPO/from_scratch/grpo.py` imports your
-`agg_loss`, `compute_policy_loss` and `kl_penalty` from `PPO/from_scratch/`.
+Order matters: **VPG before TRPO**, since TRPO's exercise reuses VPG's toy and
+update loop, and **PPO before GRPO**, since `GRPO/from_scratch/grpo.py` imports
+your `agg_loss`, `compute_policy_loss` and `kl_penalty` from `PPO/from_scratch/`.
 
 ## Running it
 
@@ -51,6 +47,8 @@ pip install -r requirements.txt
 ./scripts/run_vpg.sh run        # VPG: new rollouts every update vs reusing one batch
 ./scripts/run_vpg.sh steps      # VPG walkthrough; check / scratch / diff work as for PPO
 ./scripts/run_trpo.sh run       # TRPO vs VPG: safe reuse, KL constraint outside the loss
+./scripts/run_trpo.sh steps     # TRPO walkthrough; check / scratch / diff work as for PPO
+./scripts/run_compare.sh run    # VPG vs TRPO vs PPO, one table + figure
 ./scripts/run_ppo.sh            # list the commands
 ./scripts/run_ppo.sh check      # grade your from_scratch implementation
 ./scripts/run_ppo.sh steps      # the walkthrough
@@ -74,7 +72,8 @@ Or call the files directly:
 
 ```bash
 python VPG/steps_vpg.py      python VPG/run_vpg.py      python VPG/from_scratch/check.py
-python TRPO/run_trpo.py
+python TRPO/steps_trpo.py    python TRPO/run_trpo.py    python TRPO/from_scratch/check.py
+python Comparison/run_compare.py
 python PPO/steps_ppo.py      python PPO/run_ppo.py      python PPO/from_scratch/check.py
 python GRPO/steps_grpo.py    python GRPO/run_grpo.py    python GRPO/from_scratch/check.py
 python Agent0/steps_agent0.py python Agent0/run_agent0.py python Agent0/from_scratch/check.py
@@ -98,6 +97,55 @@ Everything outside `Agent0/`'s reward layer is `(batch, response_length)`, and
 per-sequence scalar: one outcome reward for a whole response is a row that is
 zero except at its last valid position. Every mean, variance and loss is taken
 over the mask.
+
+## From this toy to an LLM
+
+The VPG and TRPO toys use a 2×2 table of logits as the policy. A real policy is
+a neural network or a transformer, but the RL math does not change, because it
+all starts from the logits:
+
+| | State s_t | Action a_t | Logits come from |
+|---|---|---|---|
+| The VPG / TRPO toy | question type | answer / tool | `policy.logits[qtype]`, a table lookup |
+| An MLP (e.g. CartPole) | observation vector | a move | `net(obs)` |
+| An LLM | prompt + every token so far | the next token | `model(input_ids).logits` |
+
+After the logits the code is the same: `log_softmax`, pick out the log-prob of
+the action taken, then the ratio, clip, KL and loss. For an LLM, as in verl's
+`logprobs_from_logits`:
+
+```python
+logits = model(input_ids, attention_mask).logits      # (B, T, V): one pass scores every position
+logits = logits[:, prompt_len - 1:-1] / temperature   # the logits at t predict token t+1
+log_prob = torch.log_softmax(logits, -1).gather(-1, responses.unsqueeze(-1)).squeeze(-1)  # (B, R)
+```
+
+That `(batch, response_length)` tensor, with `response_mask`, is what `PPO/`,
+`GRPO/` and `Agent0/` take. The toy is the case R = 1, V = 2.
+
+What gets harder is the engineering, not the math:
+
+- **Every token is an action.** A 500-token response is 500 steps, and the
+  state is the whole prefix. KL between whole sequences is intractable, so it is
+  taken per token and averaged over the mask.
+- **The exact KL does not fit in memory.** `TRPO/trpo.py`'s `mean_kl` sums over
+  both actions. Over a ~152k vocabulary, one fp32 logits tensor for 8 × 4,096
+  tokens is ~20 GB, and the sum needs the reference model's as well. verl keeps
+  only the sampled token's log-prob and *estimates* the KL (k1 / k2 / k3 in
+  `PPO/common.py`'s `kl_penalty`); its `"full"` mode raises
+  `NotImplementedError`, as ours does.
+- **Several forward passes.** vLLM samples the rollouts, the trainer recomputes
+  `old_log_prob` (vLLM's numbers differ slightly), a frozen reference model gives
+  `ref_log_prob`, and PPO also runs a critic. GRPO drops the critic mainly to
+  save memory.
+- **Sampling settings must match.** Rollouts sampled at temperature T need their
+  log-probs computed from `logits / T`, or the ratio is not 1 at θ_old.
+- **Not every token is the policy's.** Tool outputs sit inside an agentic
+  response, but the model did not choose them; `response_mask` keeps them out
+  of the ratio, the KL and the loss.
+- **The paper's TRPO does not scale.** Its conjugate-gradient step needs
+  Fisher-vector products over billions of parameters. PPO's clip needs only
+  first-order SGD, which is why LLM training uses PPO and GRPO.
 
 ## Notes
 
