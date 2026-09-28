@@ -1,4 +1,4 @@
-"""Staged grader for ``ppo.py``. Expected constants are reference outputs."""
+"""Staged grader for ``ppo.py`` (Part 1, stages 1-6) and ``ppo_verl.py`` (Part 2, stages 7-12)."""
 
 import importlib.util
 import inspect
@@ -11,7 +11,8 @@ import torch
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 sys.path.insert(0, str(HERE.parent))
-import ppo as sol
+import ppo as sol                                   # Part 1, core PPO
+import ppo_verl as vsol                             # Part 2, verl's extras
 import task  # noqa: E402
 
 R = torch.tensor([[0., 0., 1., 0.], [0., -1., 0., 0.]])
@@ -61,9 +62,13 @@ class Fail(Exception):
     pass
 
 
+def exercise_file():
+    return "PPO/from_scratch/ppo.py" if STAGE <= 6 else "PPO/from_scratch/ppo_verl.py"
+
+
 def unfinished():
-    return Fail(f"stage {STAGE} is not filled in yet: open PPO/from_scratch/ppo.py, fill the lines marked "
-                f"'TODO stage {STAGE}', and try them with `python PPO/from_scratch/ppo.py`")
+    return Fail(f"stage {STAGE} is not filled in yet: open {exercise_file()}, fill the lines marked "
+                f"'TODO stage {STAGE}', and try them with `python {exercise_file()}`")
 
 
 def has_blank(fn):
@@ -213,11 +218,11 @@ def moved_model():
     return model
 
 
-def check_loop(ref, advantage_name, update_name, verl):
+def check_loop(ref, module, advantage_name, update_name, verl):
     """Shared by stages 6 and 12: one update against the reference, then a whole training run."""
     torch.manual_seed(0)
     batch = task.rollout(moved_model(), 32, ref.logprobs_from_logits)
-    mine = call(getattr(sol, advantage_name), {k: v.clone() for k, v in batch.items()})
+    mine = call(getattr(module, advantage_name), {k: v.clone() for k, v in batch.items()})
     theirs = getattr(ref, advantage_name)({k: v.clone() for k, v in batch.items()})
     for key in ("advantages", "returns"):
         need(key in mine, f"{advantage_name} must add batch[{key!r}]")
@@ -230,7 +235,7 @@ def check_loop(ref, advantage_name, update_name, verl):
         prepared = getattr(ref, advantage_name)({k: v.clone() for k, v in batch.items()})
         return model, update(model, optimizer, prepared)
 
-    model, metrics = one_update(lambda *a: call(getattr(sol, update_name), *a))
+    model, metrics = one_update(lambda *a: call(getattr(module, update_name), *a))
     expected, _ = one_update(getattr(ref, update_name))
     need(isinstance(metrics, dict) and "pg_loss" in metrics, f"{update_name} must return the metrics dict")
     need(not close(model.value_head, torch.tensor([0.2, 0.3, 0.4, 0.5])),
@@ -247,7 +252,7 @@ def check_loop(ref, advantage_name, update_name, verl):
          "the policy matches but the critic does not: the value loss compares model.values(m) "
          "with mb['returns']")
 
-    history, model = task.train(sol, verl=verl)
+    history, model = task.train(module, verl=verl)
     reference, _ = task.train(ref, verl=verl)
     print("  your PPO on the token task (target 2, 0, 1, 2), 40 iterations:")
     print("  " + task.header(verl))
@@ -259,34 +264,34 @@ def check_loop(ref, advantage_name, update_name, verl):
 
 
 def stage_6():
-    check_loop(_reference(), "compute_advantage", "ppo_update", verl=False)
-    print("\n  PART 1 DONE: that is core PPO, the paper's Algorithm 1 with eq. 9. Part 2 (stages 7-12)")
-    print("  is verl's production extras -- do it before GRPO, which imports agg_loss, compute_policy_loss")
-    print("  and kl_penalty from it.")
+    check_loop(_reference(), sol, "compute_advantage", "ppo_update", verl=False)
+    print("\n  PART 1 DONE: that is core PPO, the paper's Algorithm 1 with eq. 9. Part 2 (stages 7-12, in")
+    print("  ppo_verl.py) is verl's production extras -- do it before GRPO, which imports agg_loss,")
+    print("  compute_policy_loss and kl_penalty from it.")
 
 
 def stage_7():
     spread = torch.tensor([[1., 2., 3., 100.]])
     mask4 = torch.tensor([[1., 1., 1., 0.]])
-    got = call(sol.masked_var, spread, mask4)
+    got = call(vsol.masked_var, spread, mask4)
     if close(got, 0.6666667):
         raise Fail("that is the population variance; unbiased=True applies n/(n-1) "
                    "over the number of MASKED positions")
     if close(got, 0.8888889):
         raise Fail("n/(n-1) must count the REAL positions (mask.sum()), not the padded width")
     need(close(got, 1.0), f"masked_var: expected 1.0, got {num(got)}")
-    need(close(call(sol.masked_var, spread, mask4, unbiased=False), 0.6666667),
+    need(close(call(vsol.masked_var, spread, mask4, unbiased=False), 0.6666667),
          "unbiased=False must skip the Bessel correction")
 
-    got = call(sol.masked_whiten, spread, mask4)
+    got = call(vsol.masked_whiten, spread, mask4)
     need(close(got[0, :3], torch.tensor([-1.0, 0.0, 1.0])),
          f"masked positions should whiten to [-1, 0, 1], got {got[0, :3].tolist()}")
-    shifted = call(sol.masked_whiten, spread, mask4, shift_mean=False)
+    shifted = call(vsol.masked_whiten, spread, mask4, shift_mean=False)
     need(close(shifted[0, :3], torch.tensor([1.0, 2.0, 3.0])),
          "shift_mean=False re-adds the original mean after scaling")
 
 
-    got = call(sol.compute_gae_advantage_return, R, V, M, 0.9, 0.95)
+    got = call(vsol.compute_gae_advantage_return, R, V, M, 0.9, 0.95)
     need(isinstance(got, tuple) and len(got) == 2, "return the pair (advantages, returns)")
     advantages, returns = got
     if close(returns, GAE_ADV + V, atol=1e-3):
@@ -300,7 +305,7 @@ def stage_7():
 def stage_8():
     loss = torch.tensor([[1., 2., 3., 100.], [4., 5., 100., 100.]])
     for mode, expected in AGG.items():
-        got = call(sol.agg_loss, loss, M, mode)
+        got = call(vsol.agg_loss, loss, M, mode)
         if mode == "seq-mean-token-sum-norm" and close(got, 7.5):
             raise Fail("seq-mean-token-sum-norm divided by the number of responses; "
                        "Dr.GRPO's divisor is the padded width, loss_mask.shape[-1]")
@@ -308,7 +313,7 @@ def stage_8():
             raise Fail(f"{mode}: the padding (the 100s) was counted; multiply by the mask first")
         need(close(got, expected), f"{mode}: expected {expected}, got {num(got)}")
     try:
-        sol.agg_loss(loss, M, "nonsense")
+        vsol.agg_loss(loss, M, "nonsense")
     except ValueError:
         pass
     except Exception as exc:
@@ -319,13 +324,13 @@ def stage_8():
 
     logits = torch.tensor([[[2., 0., -1.], [0., 1., 0.], [1., 1., 1.], [0., 0., 0.]],
                            [[3., 0., 0.], [0., 0., 0.], [0., 0., 0.], [0., 0., 0.]]])
-    need(close(call(sol.compute_entropy_loss, logits, M), ENTROPY),
+    need(close(call(vsol.compute_entropy_loss, logits, M), ENTROPY),
          f"compute_entropy_loss with token-mean should equal entropy_bonus, {ENTROPY:.6f}")
 
 
 def stage_9():
     one = torch.ones(1, 1)
-    got = call(sol.compute_policy_loss, torch.zeros(1, 1), torch.tensor([[1.35]]).log(), one, one, cliprange=0.2)
+    got = call(vsol.compute_policy_loss, torch.zeros(1, 1), torch.tensor([[1.35]]).log(), one, one, cliprange=0.2)
     need(isinstance(got, tuple) and len(got) == 4, "return (pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower)")
     if close(got[0], -1.35):
         raise Fail("one token with A = +1 at ratio 1.35 should be clipped to -1.2: take the MAX of "
@@ -339,14 +344,14 @@ def stage_9():
     # the only situation where the dual clip does anything at all.
     logp = torch.tensor([[0.1, -0.1, 0.3, 0.], [0.8, 0.9, 0., 0.]])
     advantages = torch.tensor([[1., 1., 1., 0.], [-1., -1., 0., 0.]])
-    pg_loss, pg_clipfrac, ppo_kl, _ = call(sol.compute_policy_loss, old, logp, advantages, M, cliprange=0.2)
+    pg_loss, pg_clipfrac, ppo_kl, _ = call(vsol.compute_policy_loss, old, logp, advantages, M, cliprange=0.2)
     need(close(pg_loss, POLICY[0]), f"wrong pg_loss: expected {POLICY[0]:.8f}, got {num(pg_loss):.8f}")
     need(close(pg_clipfrac, POLICY[1]), f"wrong pg_clipfrac: got {num(pg_clipfrac)}")
     if close(ppo_kl, -POLICY[2]):
         raise Fail("ppo_kl has the wrong sign; it is the masked mean of MINUS the log-ratio")
     need(close(ppo_kl, POLICY[2]), f"wrong ppo_kl: got {num(ppo_kl)}")
 
-    dual_loss, _, _, dual_lower = call(sol.compute_policy_loss, old, logp, advantages, M,
+    dual_loss, _, _, dual_lower = call(vsol.compute_policy_loss, old, logp, advantages, M,
                                        cliprange=0.2, clip_ratio_c=1.5)
     if close(dual_loss, POLICY[0]):
         raise Fail("clip_ratio_c=1.5 changed nothing; row 1 has a negative advantage and a ratio "
@@ -356,25 +361,25 @@ def stage_9():
     need(close(dual_lower, POLICY_DUAL_LOWER),
          f"wrong pg_clipfrac_lower: expected {POLICY_DUAL_LOWER:.2f}, got {num(dual_lower):.2f}")
 
-    asym = call(sol.compute_policy_loss, old, logp, advantages, M, cliprange=0.2,
+    asym = call(vsol.compute_policy_loss, old, logp, advantages, M, cliprange=0.2,
                 cliprange_low=0.2, cliprange_high=0.3)[0]
     need(close(asym, POLICY_ASYM),
          f"wrong asymmetric-clip loss: expected {POLICY_ASYM:.8f}, got {num(asym):.8f}; "
          "clamp to [1 - cliprange_low, 1 + cliprange_high]")
     positive = torch.ones(2, 4)
-    a = call(sol.compute_policy_loss, old, logp, positive, M, cliprange=0.2, clip_ratio_c=1.5)[0]
-    b = call(sol.compute_policy_loss, old, logp, positive, M, cliprange=0.2, clip_ratio_c=3.0)[0]
+    a = call(vsol.compute_policy_loss, old, logp, positive, M, cliprange=0.2, clip_ratio_c=1.5)[0]
+    b = call(vsol.compute_policy_loss, old, logp, positive, M, cliprange=0.2, clip_ratio_c=3.0)[0]
     need(close(a, b), "with every advantage positive, clip_ratio_c must not matter: the dual clip "
          "applies only where A < 0")
 
 
 def stage_10():
     x = torch.tensor([[0., 5., -5.]])
-    got = call(sol.clip_by_value, x, torch.full((1, 3), -1.0), torch.full((1, 3), 1.0))
+    got = call(vsol.clip_by_value, x, torch.full((1, 3), -1.0), torch.full((1, 3), 1.0))
     need(close(got, torch.tensor([[0., 1., -1.]])), f"clip_by_value: expected [[0, 1, -1]], got {got.tolist()}")
 
     one = torch.ones(1, 1)
-    got = call(sol.compute_value_loss, torch.tensor([[0.2]]), torch.tensor([[0.75]]), torch.tensor([[0.1]]), one, 0.05)
+    got = call(vsol.compute_value_loss, torch.tensor([[0.2]]), torch.tensor([[0.75]]), torch.tensor([[0.1]]), one, 0.05)
     need(isinstance(got, tuple) and len(got) == 2, "return (vf_loss, vf_clipfrac)")
     if close(got[0], 0.15125):
         raise Fail("kept the SMALLER squared error; keep the larger, the pessimistic one")
@@ -384,7 +389,7 @@ def stage_10():
          f"got {num(got[0]):.4f}")
 
     vpreds = torch.tensor([[0.2, 0.3, 0.4, 0.], [0.6, 0.5, 0., 0.]])
-    vf_loss, vf_clipfrac = call(sol.compute_value_loss, vpreds, GAE_RET, V, M, 0.05)
+    vf_loss, vf_clipfrac = call(vsol.compute_value_loss, vpreds, GAE_RET, V, M, 0.05)
     need(close(vf_loss, VALUE[0]), f"wrong vf_loss: expected {VALUE[0]:.8f}, got {num(vf_loss):.8f}; "
          "clip around `values` (the old prediction), not around `returns`")
     need(close(vf_clipfrac, VALUE[1]), f"wrong vf_clipfrac: got {num(vf_clipfrac)}")
@@ -394,14 +399,14 @@ def stage_11():
     logprob = torch.tensor([[-1.0, -0.5, -2.0, 0.]])
     ref = torch.tensor([[-1.2, -0.4, -1.0, 0.]])
     for kind, expected in KL.items():
-        got = call(sol.kl_penalty, logprob, ref, kind)
+        got = call(vsol.kl_penalty, logprob, ref, kind)
         need(close(got, torch.tensor([expected])), f"kl_penalty {kind!r}: expected {expected}, got {got.tolist()}")
-    need(bool((call(sol.kl_penalty, logprob, ref, "k3") >= 0).all()),
+    need(bool((call(vsol.kl_penalty, logprob, ref, "k3") >= 0).all()),
          "k3 must be non-negative on every token")
-    need(close(call(sol.kl_penalty, logprob, ref, "low_var_kl"), torch.tensor([KL["k3"]])),
+    need(close(call(vsol.kl_penalty, logprob, ref, "low_var_kl"), torch.tensor([KL["k3"]])),
          "'low_var_kl' and 'k3' are the same estimator")
 
-    got = call(sol.compute_rewards, R, torch.zeros(2, 4), torch.full((2, 4), -0.1), 0.2)
+    got = call(vsol.compute_rewards, R, torch.zeros(2, 4), torch.full((2, 4), -0.1), 0.2)
     expected = torch.tensor([[-0.02, -0.02, 0.98, -0.02], [-0.02, -1.02, -0.02, -0.02]])
     if close(got, R + 0.02):
         raise Fail("the KL was added, not subtracted: the log-ratio is old_log_prob - ref_log_prob")
@@ -409,7 +414,7 @@ def stage_11():
 
 
 def stage_12():
-    check_loop(_reference(), "verl_compute_advantage", "verl_ppo_update", verl=True)
+    check_loop(_reference(), vsol, "verl_compute_advantage", "verl_ppo_update", verl=True)
     print("\n  PART 2 DONE: verl's PPO. The same loop; every extra sits inside a function you wrote.")
 
 
@@ -439,8 +444,8 @@ for number, (name, stage) in enumerate(STAGES, 1):
         print(f"stage {number}: {name} -- pass")
     except Fail as exc:
         print(f"stage {number}: {name} -- FAIL\n  {exc}")
-        if "from_scratch/ppo.py`" not in str(exc):
-            print("\n  Tip: `python PPO/from_scratch/ppo.py` shows your numbers next to the expected ones.")
+        if "`python PPO/from_scratch/" not in str(exc):
+            print(f"\n  Tip: `python {exercise_file()}` shows your numbers next to the expected ones.")
         raise SystemExit(1)
     except Exception:
         traceback.print_exc()

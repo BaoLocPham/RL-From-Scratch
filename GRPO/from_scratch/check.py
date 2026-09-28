@@ -13,8 +13,8 @@ sys.path.insert(0, str(HERE))
 try:
     import grpo as sol
 except Exception as exc:  # the PPO exercise is imported by grpo.py
-    print("could not import grpo.py -- it imports your PPO/from_scratch/ppo.py, "
-          f"so finish that one first.\n  {type(exc).__name__}: {exc}")
+    print("could not import grpo.py -- it imports your PPO/from_scratch/ppo_verl.py (and ppo.py), "
+          f"so finish both parts of the PPO exercise first.\n  {type(exc).__name__}: {exc}")
     raise SystemExit(1)
 
 R = torch.tensor([[0., 0., 1., 0.], [0., 0., 0., 0.],
