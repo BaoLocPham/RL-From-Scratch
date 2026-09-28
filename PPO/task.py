@@ -80,32 +80,43 @@ def rollout(model, n, logprobs_from_logits):
     }
 
 
-def train(impl, iterations=40, batch_size=32, lr=0.02, seed=0, every=None):
+def train(impl, verl=False, iterations=40, batch_size=32, lr=0.02, seed=0, every=None):
     """Algorithm 1, outer loop: collect -> compute_advantage -> ppo_update, `iterations` times.
 
-    `impl` is a module with compute_advantage, ppo_update and
-    logprobs_from_logits -- the reference (PPO/common.py) or yours
-    (PPO/from_scratch/ppo.py). Returns one row of metrics per iteration and the model.
+    `impl` is a module: the reference (PPO/common.py) or yours
+    (PPO/from_scratch/ppo.py). verl=False runs core PPO (compute_advantage,
+    ppo_update); verl=True runs the same loop with verl's functions
+    (verl_compute_advantage, verl_ppo_update). Returns one row of metrics per
+    iteration, and the model.
     """
+    advantage = impl.verl_compute_advantage if verl else impl.compute_advantage
+    update = impl.verl_ppo_update if verl else impl.ppo_update
     torch.manual_seed(seed)
     model = TokenModel()
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     history = []
+    if every:
+        print(header(verl))
     for iteration in range(iterations):
         batch = rollout(model, batch_size, impl.logprobs_from_logits)       # theta_old
-        batch = impl.compute_advantage(batch)                               # rewards -> advantages, once
-        metrics = impl.ppo_update(model, optimizer, batch)                  # K epochs of minibatches
+        batch = advantage(batch)                                            # rewards -> advantages, once
+        metrics = update(model, optimizer, batch)                           # K epochs of minibatches
         metrics["reward"] = float(batch["correct"].mean())
         history.append(metrics)
         if every and (iteration % every == 0 or iteration == iterations - 1):
-            print_row(iteration, metrics)
+            print(row(iteration, metrics))
     return history, model
 
 
-def print_row(iteration, m):
-    print(f"{iteration:>9} {m['reward']:>7.3f} {m['pg_loss']:>9.4f} {m['vf_loss']:>8.4f} "
-          f"{m['entropy']:>8.4f} {m['pg_clipfrac']:>9.3f} {m['ppo_kl']:>8.4f}")
+COLUMNS = (("reward", 7, ".3f"), ("pg_loss", 9, ".4f"), ("vf_loss", 8, ".4f"), ("entropy", 8, ".4f"),
+           ("pg_clipfrac", 9, ".3f"), ("ppo_kl", 8, ".4f"))
 
 
-HEADER = (f"{'iteration':>9} {'reward':>7} {'pg_loss':>9} {'vf_loss':>8} {'entropy':>8} "
-          f"{'clipfrac':>9} {'ppo_kl':>8}")
+def header(verl=False):
+    names = COLUMNS if verl else COLUMNS[:4]                           # clipfrac and ppo_kl are verl's metrics
+    return f"{'iteration':>9} " + " ".join(f"{name.replace('pg_clip', 'clip'):>{width}}" for name, width, _ in names)
+
+
+def row(iteration, metrics):
+    cells = [f"{metrics[name]:>{width}{fmt}}" for name, width, fmt in COLUMNS if name in metrics]
+    return f"{iteration:>9} " + " ".join(cells)

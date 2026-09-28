@@ -11,6 +11,9 @@
 #   scratch   the walkthrough, against your from_scratch implementation
 #   run       the runnable demonstration
 #   diff      prove your implementation matches: check, then steps vs scratch
+#
+# Extra words are passed to the scripts: `./scripts/run_ppo.sh check core` grades
+# PPO's Part 1 (core PPO) only, and `steps core`, `scratch core`, `diff core` stop there too.
 #   all       check, steps, run
 #
 # Agent0 only, since it alone trains two agents with two algorithms:
@@ -70,19 +73,19 @@ need_exercise() {
 cmd_check() {
     need_exercise
     banner "grading $MODULE/from_scratch/$STEM.py"
-    "$PYTHON" "$MODULE/from_scratch/check.py"
+    "$PYTHON" "$MODULE/from_scratch/check.py" "$@"
 }
 
 cmd_steps() {
     need_exercise
     banner "walkthrough (reference implementation)"
-    "$PYTHON" "$MODULE/steps_$STEM.py"
+    "$PYTHON" "$MODULE/steps_$STEM.py" "$@"
 }
 
 cmd_scratch() {
     need_exercise
     banner "walkthrough (your implementation)"
-    RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py"
+    RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py" "$@"
 }
 
 cmd_half() {
@@ -114,18 +117,18 @@ cmd_trace() {
 
 cmd_run() {
     banner "$MODULE demo"
-    "$PYTHON" "$MODULE/run_$STEM.py"
+    "$PYTHON" "$MODULE/run_$STEM.py" "$@"
 }
 
 cmd_diff() {
-    cmd_check
+    cmd_check "$@"
     banner "reference output vs yours"
     local reference mine
     reference="$(mktemp)"
     mine="$(mktemp)"
     trap 'rm -f "$reference" "$mine"' RETURN
-    "$PYTHON" "$MODULE/steps_$STEM.py" > "$reference"
-    RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py" > "$mine"
+    "$PYTHON" "$MODULE/steps_$STEM.py" "$@" > "$reference"
+    RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py" "$@" > "$mine"
     if diff -u "$reference" "$mine"; then
         echo "identical -- your implementation is indistinguishable from the reference"
     else
@@ -142,20 +145,22 @@ cmd_all() {
     cmd_run
 }
 
-case "${1:-}" in
-    check)   cmd_check   ;;
-    steps)   cmd_steps   ;;
-    scratch) cmd_scratch ;;
-    run)        cmd_run ;;
+COMMAND="${1:-}"
+shift || true                  # anything after the command goes to the Python script, e.g. `diff core`
+case "$COMMAND" in
+    check)   cmd_check "$@"   ;;
+    steps)   cmd_steps "$@"   ;;
+    scratch) cmd_scratch "$@" ;;
+    run)        cmd_run "$@" ;;
     curriculum) cmd_half curriculum ;;
     executor)   cmd_half executor ;;
     overview)   cmd_overview ;;
     trace)      cmd_trace ;;
-    diff)    cmd_diff    ;;
+    diff)    cmd_diff "$@"    ;;
     all)     cmd_all     ;;
     ""|-h|--help|help) usage ;;
     *)
-        echo "unknown command: $1" >&2
+        echo "unknown command: $COMMAND" >&2
         echo >&2
         usage >&2
         exit 1

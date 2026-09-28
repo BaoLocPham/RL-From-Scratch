@@ -1,56 +1,120 @@
-# Build PPO from scratch, the way verl writes it
+# Build PPO from scratch: the paper first, then verl
 
 Do not open `common.py` (the reference) before you finish the exercise. Work
 from the docstrings in `from_scratch/ppo.py` and the grader's messages.
 
 `Surrogates/` ended with a definition: **PPO = the loop with L^CLIP in the
-slot, plus a value loss, an entropy bonus and GAE.** This exercise builds that
-list, then the loop, at verl's shapes. It follows the paper's §5, eq. 9:
+slot, plus a value loss, an entropy bonus and GAE.** This module builds exactly
+that list, then the loop, at an LLM's shapes: the paper's §5, eq. 9
 
 ```
 L^{CLIP+VF+S}(θ) = Ê_t[ L^CLIP_t − c1 · L^VF_t + c2 · S[π_θ](s_t) ]
 ```
 
-and Algorithm 1 (the Notion page's §6.1):
+in two parts. **Part 1 is PPO itself** (the paper, stages 1–6) and ends with
+your code training a model. **Part 2 is what verl adds for production**
+(stages 7–12): for later, but before GRPO.
+
+## The whole picture
+
+Algorithm 1, with the stage that builds each line. The right-hand column is
+what Part 2 adds to the same line; the loop itself never changes.
 
 ```
+                                                  PART 1: core PPO (stage)          PART 2: verl adds (stage)
 for iteration:
-    batch = rollout(model)                        θ_old: N responses of T tokens
-    batch = compute_advantage(batch)              KL into the reward, then GAE -- once
-    for epoch in range(K):
+    batch = rollout(model)                        given, task.py
+        tokens, response_mask, old_log_prob,        uses your logprobs_from_logits (1)
+        values, token_level_scores
+    batch = compute_advantage(batch)              compute_advantage (6)             verl_compute_advantage (12)
+        reward per token                            the scores as they are           - KL to a reference model (11)
+        advantages, returns = GAE                   compute_gae (2)                  + whitening (7)
+    for epoch in range(K):                        ppo_update (6)                    verl_ppo_update (12)
         for minibatch of M:
-            loss = pg_loss + c1 · vf_loss − c2 · entropy      eq. 9, negated
+            log pi per token                        logprobs_from_logits (1)
+            pg_loss = -L^CLIP                       ppo_clip_loss (3)                + asymmetric range, dual clip,
+                                                                                       pg_clipfrac, ppo_kl (9)
+            vf_loss = L^VF                          value_loss (4)                   + clipped around the old value (10)
+            entropy = S                             entropy_bonus (5)
+            every E_t over tokens                   masked_mean (1)                  + agg_loss, four modes (8)
+            loss = pg_loss + c1*vf_loss - c2*entropy     (6)                           the same (12)
             zero_grad, backward, step
 ```
 
+Where it sits: `VPG/` → `TRPO/` → `Surrogates/` (the toy track, one decision
+per question) → **`PPO/`** (T tokens per response, a critic) → `GRPO/` (the
+same loop without the critic) → `Agent0/`.
+
+### The files
+
+| File | What it is | Yours to edit? |
+|---|---|---|
+| `from_scratch/ppo.py` | the exercise: 12 stages of TODOs, worked examples, and a playground (`python PPO/from_scratch/ppo.py`) | **yes** |
+| `from_scratch/check.py` | the grader: stages in order, stops at the first gap, with a hint | no |
+| `task.py` | the token task: the model, `rollout`, and `train`, the outer loop | no, read it |
+| `steps_ppo.py` | the walkthrough: every equation with its numbers substituted | no |
+| `run_ppo.py` | the demo: trains the token task and explains each column | no |
+| `common.py` | the reference implementation | do not open until you finish |
+
+### The commands
+
+| Command | Does |
+|---|---|
+| `python PPO/from_scratch/ppo.py` | your value for every stage next to the expected one |
+| `./scripts/run_ppo.sh check core` | grade Part 1 (stages 1–6) |
+| `./scripts/run_ppo.sh steps core` | the Part 1 walkthrough, reference implementation |
+| `./scripts/run_ppo.sh diff core` | grade Part 1, then prove your walkthrough matches the reference line for line |
+| `RL_IMPL=scratch ./scripts/run_ppo.sh run` | train the token task with your core PPO |
+| `./scripts/run_ppo.sh check` / `diff` / `run verl` | the same, including Part 2 |
+
+## The stages
+
+### Part 1, core PPO: the paper only (stages 1–6)
+
 | Stage | You build | Paper | Question it answers |
 |---|---|---|---|
-| 1 | `logprobs_from_logits`, `masked_mean`, `masked_var`, `masked_whiten` | — | How does one decision become T tokens, and why must padding never reach a statistic? |
-| 2 | `compute_gae_advantage_return` | eq. 11–12 | Which token earned a reward that arrives only at the end? Why is the mask not a `dones` flag? |
-| 3 | `agg_loss` | eq. 7's Ê_t | Should a long response count for more than a short one? |
-| 4 | `compute_policy_loss` | eq. 7 | Why does Surrogates' `min` become a `max`, and what does the dual clip add? |
-| 5 | `clip_by_value`, `compute_value_loss` | eq. 9's L^VF | Why clip the critic around its own old prediction? |
-| 6 | `entropy_from_logits`, `compute_entropy_loss` | eq. 9's S | Why is a bonus subtracted from the loss? |
-| 7 | `kl_penalty`, `compute_rewards` | — (RLHF) | How is this KL different from the paper's, and why is it in the reward? |
-| 8 | `compute_advantage`, `ppo_update` | Algorithm 1, eq. 9 | Can your pieces train something? |
+| 1 | `logprobs_from_logits`, `masked_mean` | — | How does one decision become T tokens, and why must padding never reach a mean? |
+| 2 | `compute_gae` | eq. 11–12 | Which token earned a reward that arrives only at the end? Why is the mask not a `dones` flag? |
+| 3 | `ppo_clip_loss` | eq. 7 | Why does Surrogates' `min` become a `max`? |
+| 4 | `value_loss` | eq. 9's L^VF | What is the critic trained to predict? |
+| 5 | `entropy_from_logits`, `entropy_bonus` | eq. 9's S | Why is a bonus subtracted from the loss? |
+| 6 | `compute_advantage`, `ppo_update` | Algorithm 1, eq. 9 | Can your pieces train something? |
 
-Finish `VPG/`, `TRPO/` and `Surrogates/` first. Stage 4 is your Surrogates
+### Part 2, verl's extras (stages 7–12), for later
+
+Each verl function is your Part 1 version plus one idea, and the Part 1 lines
+come filled in.
+
+| Stage | You build | Adds | Why production wants it |
+|---|---|---|---|
+| 7 | `masked_var`, `masked_whiten`, `compute_gae_advantage_return` | whitened advantages | the step size stops following the reward's scale |
+| 8 | `agg_loss`, `compute_entropy_loss` | four ways to average over tokens | should a long response outweigh a short one? (Dr.GRPO) |
+| 9 | `compute_policy_loss` | asymmetric range, dual clip, `pg_clipfrac`, `ppo_kl` | bounds bad tokens made much more likely; metrics to watch |
+| 10 | `clip_by_value`, `compute_value_loss` | a clipped critic | one minibatch cannot yank the critic far |
+| 11 | `kl_penalty`, `compute_rewards` | KL to a frozen reference, in the reward | RLHF: stay close to the model before RL (not the paper's KL) |
+| 12 | nothing | the same loop, verl's functions | — |
+
+Finish `VPG/`, `TRPO/` and `Surrogates/` first: stage 3 is your Surrogates
 clip, per token. `GRPO/from_scratch/` imports your `agg_loss`,
-`compute_policy_loss`, `kl_penalty` and `masked_mean`, so do this before GRPO.
+`compute_policy_loss`, `kl_penalty` and `masked_mean`, so it needs Part 2.
 
 ## How to start
 
 Most TODOs are one line, and every stage has a worked example with the numbers
-you should get.
+you should get. Reading `./scripts/run_ppo.sh steps core` first shows where
+each stage is heading.
 
 1. Fill the lines marked `TODO stage 1` in `from_scratch/ppo.py`.
 2. Try them: `python PPO/from_scratch/ppo.py` prints your result for every
    stage next to the expected one.
-3. Check them: `./scripts/run_ppo.sh check` grades the stages in order and stops
-   at the first one that is not right yet, with a hint about the likely mistake.
-4. Repeat through stage 8. Then `./scripts/run_ppo.sh diff` proves your
-   walkthrough matches the reference line for line, and
-   `RL_IMPL=scratch ./scripts/run_ppo.sh run` trains the token task with your code.
+3. Check them: `./scripts/run_ppo.sh check core` grades Part 1 and stops at the
+   first stage that is not right yet, with a hint about the likely mistake.
+4. Repeat through stage 6. Then:
+   - `./scripts/run_ppo.sh diff core` proves your Part 1 walkthrough matches
+     the reference line for line;
+   - `RL_IMPL=scratch ./scripts/run_ppo.sh run` trains the token task with your code.
+
+For Part 2 later, drop the `core`: `check`, `diff`, and `run verl`.
 
 ## The token task (`task.py`, given)
 
@@ -61,15 +125,18 @@ responses of up to 4 tokens from a vocabulary of 3, a hidden target
 value head as the critic. The "model" is a table of logits per position, a
 stand-in for a transformer, whose state at position t would be the whole prefix.
 
-The reference learns the target in about 20 iterations:
+Both parts learn the target in about 20 iterations:
 
-| Iteration | Reward | vf_loss | Entropy | clipfrac |
-|---|---|---|---|---|
-| 0 | 0.341 | 0.0586 | 1.0903 | 0.119 |
-| 5 | 0.747 | 0.0185 | 0.5774 | 0.049 |
-| 10 | 0.938 | 0.0048 | 0.2509 | 0.007 |
-| 20 | 0.990 | 0.0014 | 0.0850 | 0.002 |
-| 39 | 1.000 | 0.0000 | 0.0343 | 0.000 |
+| Iteration | Core PPO reward | verl PPO reward |
+|---|---|---|
+| 0 | 0.341 | 0.341 |
+| 5 | 0.701 | 0.747 |
+| 10 | 0.904 | 0.938 |
+| 20 | 0.982 | 0.990 |
+| 39 | 0.982 | 1.000 |
+
+verl's version is slightly faster here, mostly from whitening the advantages.
+The algorithm is the same.
 
 ## From the toy track to here
 
@@ -78,8 +145,8 @@ The reference learns the target in about 20 iterations:
 | One rollout | one question, one action | a response of T tokens, `(batch, response_length)` |
 | log π | `policy.dist(qtype).log_prob(action)` | `logprobs_from_logits(logits, tokens)` |
 | Advantage | reward − batch mean, one number | GAE per token, with a learned critic |
-| The mean Ê_t | `.mean()` | `agg_loss`, four modes, over `response_mask` |
-| The slot | `clip_loss` | `compute_policy_loss` + `c1·compute_value_loss` − `c2·compute_entropy_loss` |
+| The mean Ê_t | `.mean()` | `masked_mean` over `response_mask` (Part 2: `agg_loss`, four modes) |
+| The slot | `clip_loss` | `ppo_clip_loss` + `c1·value_loss` − `c2·entropy_bonus` (eq. 9) |
 | An update | the whole batch per step | minibatches of M, K epochs |
 | KL | to θ_old (TRPO, adaptive β) | also to a frozen reference model, in the reward |
 
@@ -89,8 +156,8 @@ The reference learns the target in about 20 iterations:
 single outcome reward for a whole response is a row that is zero except at its
 last real token; a single advantage is a row repeated across the response.
 
-**`response_mask` is the only thing that makes a position real.** Every mean,
-sum, variance and loss is taken over it. In GAE it is *not* a `dones` flag: a
+**`response_mask` is the only thing that makes a position real.** Every mean
+and loss is taken over it. In GAE it is *not* a `dones` flag: a
 masked position in the middle of a response (a tool's output) carries the
 running values through, so the tokens before it still get credit.
 
@@ -100,24 +167,32 @@ Clipping and eq. 9 are from
 [Proximal Policy Optimization Algorithms](https://arxiv.org/abs/1707.06347);
 GAE (stage 2) is eq. 11–12 there, from
 [High-Dimensional Continuous Control Using GAE](https://arxiv.org/abs/1506.02438).
-The dual clip in stage 4 is from
+The dual clip in stage 9 is from
 [Mastering Complex Control in MOBA Games](https://arxiv.org/pdf/1912.09729).
-Stage 3's `seq-mean-token-sum-norm` is [Dr.GRPO](https://arxiv.org/abs/2503.20783)'s
-constant divisor. Stage 7's reference KL is RLHF's
+Stage 8's `seq-mean-token-sum-norm` is [Dr.GRPO](https://arxiv.org/abs/2503.20783)'s
+constant divisor. Stage 11's reference KL is RLHF's
 ([InstructGPT](https://arxiv.org/abs/2203.02155)), and `k3` is from
 [Approximating KL Divergence](http://joschu.net/blog/kl-approx.html).
 
 ## At the end, you should be able to answer
 
+Part 1:
+
 - In stage 2, why does a masked position in the MIDDLE of a response carry
   `nextvalues` and `lastgaelam` through rather than resetting them? What would
   the first token's return be if it reset?
+- In stage 3, Surrogates' clip took a `min`; `ppo_clip_loss` takes a `max`. Show
+  they are the same thing.
+- In stage 6, the first optimizer step of every iteration has every ratio at 1.
+  What is `pg_loss` then, and why does the policy still move?
+- The critic's target is the return, the actor's signal is the advantage. Which
+  one would you expect to be large when the policy is already good?
+
+Part 2:
+
 - Why is `returns` computed before the advantage is whitened?
-- In stage 4, Surrogates' clip took a `min`; verl's takes a `max`. Show they are
-  the same thing. What does the dual clip bound that the ordinary clip cannot?
+- What does the dual clip bound that the ordinary clip cannot?
 - Under `token-mean`, does a 500-token response influence the update more than a
   50-token one? Which mode would make length irrelevant?
-- The paper's KL (eq. 8) and stage 7's KL both measure distance between two
+- The paper's KL (eq. 8) and stage 11's KL both measure distance between two
   policies. Which two, in each case, and why does RLHF need the second one?
-- In stage 8, the first optimizer step of every iteration has `pg_loss` 0 and
-  `clipfrac` 0. Why, and why does the policy still move?

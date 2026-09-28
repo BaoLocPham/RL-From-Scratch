@@ -19,6 +19,11 @@ V = torch.tensor([[0.1, 0.2, 0.3, 0.4], [0.5, 0.4, 0.3, 0.2]])
 M = torch.tensor([[1., 1., 1., 0.], [1., 1., 0., 0.]])
 
 LOGPROBS = [-1.09861231, -0.16984603]
+GAE_RAW = torch.tensor([[0.65156752, 0.66850001, 0.69999999, 0.0], [-1.33700001, -1.39999998, 0.0, 0.0]])
+CLIP_BATCH = 0.29502711                             # core ppo_clip_loss on the stage 9 batch (eps 0.2)
+CLIP_BATCH_MIN = -0.19197340                        # the same with min instead of max
+VLOSS = 0.53023881                                  # core value_loss on the stage 10 batch
+VLOSS_NO_HALF, VLOSS_UNMASKED = 1.06047761, 0.34952426
 GAE_ADV = torch.tensor([[0.71058786, 0.72572333, 0.75388032, 0.12816931],
                         [-1.06693876, -1.12325275, 0.12816931, 0.12816931]])
 GAE_RET = torch.tensor([[0.75156754, 0.86849999, 1.0, 0.40000001],
@@ -121,7 +126,146 @@ def stage_1():
     need(close(got, 1.5), f"masked_mean: expected 1.5, got {num(got)}")
     need(torch.isfinite(torch.as_tensor(call(sol.masked_mean, values, torch.zeros(1, 3)))).all(),
          "an all-zero mask must stay finite; verl adds 1e-8 to the count rather than clamping")
+    need(close(call(sol.masked_mean, torch.tensor([[1., 2.], [3., 4.]]), torch.ones(2, 2), axis=-1), [1.5, 3.5]),
+         "masked_mean(..., axis=-1) should average each row separately: pass axis to both sums")
 
+
+def stage_2():
+    got = call(sol.compute_gae, R, V, M, 0.9, 0.95)
+    need(isinstance(got, tuple) and len(got) == 2, "return the pair (advantages, returns)")
+    advantages, returns = got
+    need(close(advantages, GAE_RAW),
+         f"wrong advantages.\n  expected {GAE_RAW.tolist()}\n  got      {advantages.tolist()}\n"
+         "  row 0 by hand: A_2 = 0.70, A_1 = 0.07 + 0.855 * 0.70 = 0.6685, A_0 = 0.08 + 0.855 * 0.6685 = 0.6516")
+    need(close(returns, GAE_RET),
+         f"advantages are right but returns are not: returns = advantages + values.\n"
+         f"  expected {GAE_RET.tolist()}\n  got      {returns.tolist()}")
+
+    _, hole_returns = call(sol.compute_gae, HOLE_R, HOLE_V, HOLE_M, 1.0, 1.0)
+    if close(hole_returns[0, 2:], [1.0, 1.0]) and not close(hole_returns[0, 0], 1.0):
+        raise Fail("a masked position in the MIDDLE reset the carry to zero, so the first token lost part of "
+                   "its credit for the final reward (return below 1.0). response_mask is not a "
+                   "`dones` flag: where it is 0, keep nextvalues and lastgaelam as they were")
+    need(close(hole_returns, [HOLE_RET]),
+         f"a response with a tool-output token in the middle (mask [1, 0, 1, 1]): expected returns "
+         f"{HOLE_RET}, got {hole_returns.tolist()}")
+
+
+def stage_3():
+    one = torch.ones(1, 1)
+    got = call(sol.ppo_clip_loss, torch.zeros(1, 1), torch.tensor([[1.35]]).log(), one, one)
+    need(torch.as_tensor(got).numel() == 1, "return one number: the masked mean over the tokens")
+    if close(got, -1.35):
+        raise Fail("one token with A = +1 at ratio 1.35 should be clipped to -1.2: take the MAX of the two "
+                   "(the minus sign turned Surrogates' min into a max)")
+    if close(got, 1.2):
+        raise Fail("the sign is flipped; the loss is -A * ratio, so descent raises the objective")
+    need(close(got, -1.2), f"one token, A +1, ratio 1.35: expected -1.2, got {num(got):.4f}")
+    need(close(call(sol.ppo_clip_loss, torch.zeros(1, 1), torch.tensor([[0.7]]).log(), one, one), -0.7),
+         "A +1 at ratio 0.7 moved the WRONG way: it should pay in full, -0.7, not the clipped -0.8")
+
+    old = torch.zeros(2, 4)
+    logp = torch.tensor([[0.1, -0.1, 0.3, 0.], [0.8, 0.9, 0., 0.]])
+    advantages = torch.tensor([[1., 1., 1., 0.], [-1., -1., 0., 0.]])
+    got = call(sol.ppo_clip_loss, old, logp, advantages, M)
+    if close(got, CLIP_BATCH_MIN):
+        raise Fail("that is the min; once the minus sign is inside, the pessimistic choice is the MAX")
+    need(close(got, CLIP_BATCH), f"a batch of two responses: expected {CLIP_BATCH:.6f}, got {num(got):.6f}. "
+         "Average over the mask with your masked_mean")
+    loss = call(sol.ppo_clip_loss, old, logp.clone().requires_grad_(), advantages, M)
+    need(loss.requires_grad, "the loss must carry gradient back to log_prob: no .item() or torch.no_grad()")
+
+
+def stage_4():
+    one = torch.ones(1, 1)
+    got = call(sol.value_loss, torch.tensor([[0.2]]), torch.tensor([[0.75]]), one)
+    if close(got, 0.3025):
+        raise Fail("missing the 0.5")
+    need(close(got, 0.15125), f"one token, prediction 0.2, return 0.75: expected 0.15125, got {num(got):.5f}")
+    vpreds = torch.tensor([[0.2, 0.3, 0.4, 0.], [0.6, 0.5, 0., 0.]])
+    got = call(sol.value_loss, vpreds, GAE_RET, M)
+    if close(got, VLOSS_UNMASKED):
+        raise Fail("the padded positions were counted; average over the mask")
+    need(close(got, VLOSS), f"a batch of two responses: expected {VLOSS:.6f}, got {num(got):.6f}")
+
+
+def stage_5():
+    got = call(sol.entropy_from_logits, torch.zeros(1, 1, 4))
+    need(close(got, torch.full((1, 1), 1.3862944)),
+         f"a uniform distribution over 4 has entropy ln 4 = 1.3863, got {got.tolist()}")
+    need(num(call(sol.entropy_from_logits, torch.tensor([[[50., 0., 0., 0.]]]))) < 1e-6,
+         "a near-deterministic distribution has entropy about zero")
+    logits = torch.tensor([[[2., 0., -1.], [0., 1., 0.], [1., 1., 1.], [0., 0., 0.]],
+                           [[3., 0., 0.], [0., 0., 0.], [0., 0., 0.], [0., 0., 0.]]])
+    got = call(sol.entropy_bonus, logits, M)
+    if close(got, -ENTROPY):
+        raise Fail("entropy is returned POSITIVE; the loss subtracts it (stage 6)")
+    need(close(got, ENTROPY), f"entropy_bonus: expected {ENTROPY:.8f}, got {num(got):.8f}")
+
+
+def moved_model():
+    """A model some way from the start (and from the reference), so nothing is trivially zero."""
+    model = task.TokenModel()
+    with torch.no_grad():
+        model.policy_logits.copy_(torch.tensor([[0.5, -0.5, 1.0], [1.0, 0.0, -1.0],
+                                                [0.0, 0.8, 0.2], [-0.3, 0.3, 0.9]]))
+        model.value_head.copy_(torch.tensor([0.2, 0.3, 0.4, 0.5]))
+    return model
+
+
+def check_loop(ref, advantage_name, update_name, verl):
+    """Shared by stages 6 and 12: one update against the reference, then a whole training run."""
+    torch.manual_seed(0)
+    batch = task.rollout(moved_model(), 32, ref.logprobs_from_logits)
+    mine = call(getattr(sol, advantage_name), {k: v.clone() for k, v in batch.items()})
+    theirs = getattr(ref, advantage_name)({k: v.clone() for k, v in batch.items()})
+    for key in ("advantages", "returns"):
+        need(key in mine, f"{advantage_name} must add batch[{key!r}]")
+        need(close(mine[key], theirs[key]), f"{advantage_name}: batch[{key!r}] differs from the reference")
+
+    def one_update(update):
+        torch.manual_seed(1)                                        # the same shuffles for both
+        model = moved_model()
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.02)
+        prepared = getattr(ref, advantage_name)({k: v.clone() for k, v in batch.items()})
+        return model, update(model, optimizer, prepared)
+
+    model, metrics = one_update(lambda *a: call(getattr(sol, update_name), *a))
+    expected, _ = one_update(getattr(ref, update_name))
+    need(isinstance(metrics, dict) and "pg_loss" in metrics, f"{update_name} must return the metrics dict")
+    need(not close(model.value_head, torch.tensor([0.2, 0.3, 0.4, 0.5])),
+         "the critic did not move. Is vf_coef * vf_loss in the loss, and is the value loss's TARGET "
+         "mb['returns']?")
+    need(not close(model.policy_logits, moved_model().policy_logits),
+         "the policy did not move: is pg_loss in the loss, built from your log_prob (which carries gradient)?")
+    if not close(model.policy_logits, expected.policy_logits, atol=1e-4):
+        raise Fail("after one update the policy differs from the reference. Check eq. 9's signs, "
+                   "loss = pg_loss + vf_coef * vf_loss - entropy_coeff * entropy (the entropy bonus is "
+                   "SUBTRACTED), and that the policy loss gets mb['old_log_prob'] -- the FROZEN one -- "
+                   "your log_prob and mb['advantages'], in that order")
+    need(close(model.value_head, expected.value_head, atol=1e-4),
+         "the policy matches but the critic does not: the value loss compares model.values(m) "
+         "with mb['returns']")
+
+    history, model = task.train(sol, verl=verl)
+    reference, _ = task.train(ref, verl=verl)
+    print("  your PPO on the token task (target 2, 0, 1, 2), 40 iterations:")
+    print("  " + task.header(verl))
+    for i in (0, 5, 10, 20, 39):
+        print("  " + task.row(i, history[i]))
+    need(abs(history[-1]["reward"] - reference[-1]["reward"]) < 1e-4,
+         f"final reward {history[-1]['reward']:.3f}, the reference reaches {reference[-1]['reward']:.3f}")
+    print(f"  learned tokens: {model.policy_logits.argmax(-1).tolist()}   (target {task.TARGET.tolist()})")
+
+
+def stage_6():
+    check_loop(_reference(), "compute_advantage", "ppo_update", verl=False)
+    print("\n  PART 1 DONE: that is core PPO, the paper's Algorithm 1 with eq. 9. Part 2 (stages 7-12)")
+    print("  is verl's production extras -- do it before GRPO, which imports agg_loss, compute_policy_loss")
+    print("  and kl_penalty from it.")
+
+
+def stage_7():
     spread = torch.tensor([[1., 2., 3., 100.]])
     mask4 = torch.tensor([[1., 1., 1., 0.]])
     got = call(sol.masked_var, spread, mask4)
@@ -142,30 +286,18 @@ def stage_1():
          "shift_mean=False re-adds the original mean after scaling")
 
 
-def stage_2():
     got = call(sol.compute_gae_advantage_return, R, V, M, 0.9, 0.95)
     need(isinstance(got, tuple) and len(got) == 2, "return the pair (advantages, returns)")
     advantages, returns = got
     if close(returns, GAE_ADV + V, atol=1e-3):
-        raise Fail("returns were built from the WHITENED advantage; compute returns first, then whiten")
-    need(close(returns, GAE_RET),
-         f"wrong returns.\n  expected {GAE_RET.tolist()}\n  got      {returns.tolist()}\n"
-         "  row 0 by hand: A = [0.6516, 0.6685, 0.70], plus values [0.1, 0.2, 0.3]")
+        raise Fail("returns were built from the WHITENED advantage; take them from compute_gae as they are")
+    need(close(returns, GAE_RET), "returns should be compute_gae's, untouched")
     need(close(advantages, GAE_ADV),
-         f"returns are right but the advantages are not; whiten them over the mask.\n"
+         f"advantages should be compute_gae's, whitened over the mask.\n"
          f"  expected {GAE_ADV.tolist()}\n  got      {advantages.tolist()}")
 
-    _, hole_returns = call(sol.compute_gae_advantage_return, HOLE_R, HOLE_V, HOLE_M, 1.0, 1.0)
-    if close(hole_returns[0, 2:], [1.0, 1.0]) and not close(hole_returns[0, 0], 1.0):
-        raise Fail("a masked position in the MIDDLE reset the carry to zero, so the first token lost part of "
-                   "its credit for the final reward (return below 1.0). response_mask is not a "
-                   "`dones` flag: where it is 0, keep nextvalues and lastgaelam as they were")
-    need(close(hole_returns, [HOLE_RET]),
-         f"a response with a tool-output token in the middle (mask [1, 0, 1, 1]): expected returns "
-         f"{HOLE_RET}, got {hole_returns.tolist()}")
 
-
-def stage_3():
+def stage_8():
     loss = torch.tensor([[1., 2., 3., 100.], [4., 5., 100., 100.]])
     for mode, expected in AGG.items():
         got = call(sol.agg_loss, loss, M, mode)
@@ -185,7 +317,13 @@ def stage_3():
         raise Fail("an unknown loss_agg_mode must raise ValueError")
 
 
-def stage_4():
+    logits = torch.tensor([[[2., 0., -1.], [0., 1., 0.], [1., 1., 1.], [0., 0., 0.]],
+                           [[3., 0., 0.], [0., 0., 0.], [0., 0., 0.], [0., 0., 0.]]])
+    need(close(call(sol.compute_entropy_loss, logits, M), ENTROPY),
+         f"compute_entropy_loss with token-mean should equal entropy_bonus, {ENTROPY:.6f}")
+
+
+def stage_9():
     one = torch.ones(1, 1)
     got = call(sol.compute_policy_loss, torch.zeros(1, 1), torch.tensor([[1.35]]).log(), one, one, cliprange=0.2)
     need(isinstance(got, tuple) and len(got) == 4, "return (pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower)")
@@ -230,7 +368,7 @@ def stage_4():
          "applies only where A < 0")
 
 
-def stage_5():
+def stage_10():
     x = torch.tensor([[0., 5., -5.]])
     got = call(sol.clip_by_value, x, torch.full((1, 3), -1.0), torch.full((1, 3), 1.0))
     need(close(got, torch.tensor([[0., 1., -1.]])), f"clip_by_value: expected [[0, 1, -1]], got {got.tolist()}")
@@ -252,22 +390,7 @@ def stage_5():
     need(close(vf_clipfrac, VALUE[1]), f"wrong vf_clipfrac: got {num(vf_clipfrac)}")
 
 
-def stage_6():
-    got = call(sol.entropy_from_logits, torch.zeros(1, 1, 4))
-    need(close(got, torch.full((1, 1), 1.3862944)),
-         f"a uniform distribution over 4 has entropy ln 4 = 1.3863, got {got.tolist()}")
-    need(num(call(sol.entropy_from_logits, torch.tensor([[[50., 0., 0., 0.]]]))) < 1e-6,
-         "a near-deterministic distribution has entropy about zero")
-
-    logits = torch.tensor([[[2., 0., -1.], [0., 1., 0.], [1., 1., 1.], [0., 0., 0.]],
-                           [[3., 0., 0.], [0., 0., 0.], [0., 0., 0.], [0., 0., 0.]]])
-    got = call(sol.compute_entropy_loss, logits, M)
-    if close(got, -ENTROPY):
-        raise Fail("entropy is returned POSITIVE; the trainer subtracts it (stage 8)")
-    need(close(got, ENTROPY), f"compute_entropy_loss: expected {ENTROPY:.8f}, got {num(got):.8f}")
-
-
-def stage_7():
+def stage_11():
     logprob = torch.tensor([[-1.0, -0.5, -2.0, 0.]])
     ref = torch.tensor([[-1.2, -0.4, -1.0, 0.]])
     for kind, expected in KL.items():
@@ -285,78 +408,29 @@ def stage_7():
     need(close(got, expected), f"compute_rewards: expected {expected.tolist()}, got {got.tolist()}")
 
 
-def stage_8():
-    ref = _reference()
-
-    def moved_model():
-        """A model some way from the reference, so the KL in the reward is not zero."""
-        model = task.TokenModel()
-        with torch.no_grad():
-            model.policy_logits.copy_(torch.tensor([[0.5, -0.5, 1.0], [1.0, 0.0, -1.0],
-                                                    [0.0, 0.8, 0.2], [-0.3, 0.3, 0.9]]))
-            model.value_head.copy_(torch.tensor([0.2, 0.3, 0.4, 0.5]))
-        return model
-
-    torch.manual_seed(0)
-    batch = task.rollout(moved_model(), 32, ref.logprobs_from_logits)
-    mine = call(sol.compute_advantage, {k: v.clone() for k, v in batch.items()})
-    theirs = ref.compute_advantage({k: v.clone() for k, v in batch.items()})
-    for key in ("token_level_rewards", "advantages", "returns"):
-        need(key in mine, f"compute_advantage must add batch[{key!r}]")
-        if key == "token_level_rewards" and close(mine[key], batch["token_level_scores"]):
-            raise Fail("token_level_rewards equals the raw scores: fold the KL in with your compute_rewards")
-        need(close(mine[key], theirs[key]), f"compute_advantage: batch[{key!r}] differs from the reference")
-
-    def one_update(update):
-        torch.manual_seed(1)                                        # the same shuffles for both
-        model = moved_model()
-        optimizer = torch.optim.Adam(model.parameters(), lr=0.02)
-        prepared = ref.compute_advantage({k: v.clone() for k, v in batch.items()})
-        metrics = update(model, optimizer, prepared)
-        return model, metrics
-
-    model, metrics = one_update(lambda *a: call(sol.ppo_update, *a))
-    expected, _ = one_update(ref.ppo_update)
-    need(isinstance(metrics, dict) and "pg_loss" in metrics, "ppo_update must return the metrics dict")
-    need(not close(model.value_head, torch.tensor([0.2, 0.3, 0.4, 0.5])),
-         "the critic did not move. Is vf_coef * vf_loss in the loss, and is the value loss's TARGET "
-         "mb['returns']? (compute_value_loss(model.values(m), mb['returns'], mb['values'], ...))")
-    if close(metrics["ppo_kl"], 0.0, atol=1e-9) and close(metrics["pg_clipfrac"], 0.0, atol=1e-9):
-        raise Fail("ppo_kl and pg_clipfrac are exactly 0 on every update: the ratio never left 1. The old "
-                   "log-prob must be the batch's frozen mb['old_log_prob'], not one recomputed now")
-    if not close(model.policy_logits, expected.policy_logits, atol=1e-4):
-        raise Fail("after one ppo_update the policy differs from the reference. Check eq. 9's signs, "
-                   "loss = pg_loss + vf_coef * vf_loss - entropy_coeff * entropy (the entropy bonus is "
-                   "SUBTRACTED), and that compute_policy_loss gets mb['old_log_prob'], your log_prob and "
-                   "mb['advantages'], in that order")
-    need(close(model.value_head, expected.value_head, atol=1e-4),
-         "the policy matches but the critic does not: compare the value loss's arguments -- "
-         "model.values(m) is the new prediction, mb['returns'] the target, mb['values'] the old one")
-
-    print(f"  your PPO on the token task (target 2, 0, 1, 2), 40 iterations:")
-    print("  " + task.HEADER)
-    history, model = task.train(sol, iterations=40)
-    reference, _ = task.train(ref, iterations=40)
-    for i in (0, 5, 10, 20, 39):
-        m = history[i]
-        print(f"  {i:>9} {m['reward']:>7.3f} {m['pg_loss']:>9.4f} {m['vf_loss']:>8.4f} "
-              f"{m['entropy']:>8.4f} {m['pg_clipfrac']:>9.3f} {m['ppo_kl']:>8.4f}")
-    need(abs(history[-1]["reward"] - reference[-1]["reward"]) < 1e-4,
-         f"final reward {history[-1]['reward']:.3f}, the reference reaches {reference[-1]['reward']:.3f}")
-    learned = model.policy_logits.argmax(-1).tolist()
-    print(f"  learned tokens: {learned}   (target {task.TARGET.tolist()})")
+def stage_12():
+    check_loop(_reference(), "verl_compute_advantage", "verl_ppo_update", verl=True)
+    print("\n  PART 2 DONE: verl's PPO. The same loop; every extra sits inside a function you wrote.")
 
 
 STAGES = [
-    ("one decision -> T tokens: log-probs and masked statistics", stage_1),
-    ("GAE, the advantage (eq. 11-12)", stage_2),
-    ("E_t: four ways to average over tokens", stage_3),
-    ("L^CLIP per token, with verl's dual clip (eq. 7)", stage_4),
-    ("L^VF, the clipped value loss", stage_5),
-    ("S, the entropy bonus", stage_6),
-    ("KL to a reference model, folded into the reward", stage_7),
-    ("the loop: Algorithm 1 with eq. 9", stage_8),
+    ("(core) one decision -> T tokens: log-probs and the masked mean", stage_1),
+    ("(core) GAE, the advantage (eq. 11-12)", stage_2),
+    ("(core) L^CLIP per token (eq. 7)", stage_3),
+    ("(core) L^VF, the value loss", stage_4),
+    ("(core) S, the entropy bonus", stage_5),
+    ("(core) the loop, Algorithm 1 with eq. 9", stage_6),
+    ("(verl) whitening the advantages", stage_7),
+    ("(verl) four ways to average over tokens", stage_8),
+    ("(verl) asymmetric and dual clip, with metrics", stage_9),
+    ("(verl) the clipped value loss", stage_10),
+    ("(verl) KL to a reference model, in the reward", stage_11),
+    ("(verl) the same loop with verl's functions", stage_12),
 ]
+
+CORE_ONLY = "core" in sys.argv[1:]                 # `check.py core`: Part 1 only
+if CORE_ONLY:
+    STAGES = STAGES[:6]
 
 for number, (name, stage) in enumerate(STAGES, 1):
     STAGE = number
@@ -371,4 +445,4 @@ for number, (name, stage) in enumerate(STAGES, 1):
     except Exception:
         traceback.print_exc()
         raise SystemExit(1)
-print("all PPO stages pass")
+print("all core PPO stages pass (Part 2, verl's extras: run without `core`)" if CORE_ONLY else "all PPO stages pass")
