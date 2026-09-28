@@ -55,12 +55,12 @@ agents teaching each other*.
 | 1 | `VPG/` | J(θ), the baseline advantage, L^PG, the update loop | — |
 | 2 | `TRPO/` | the ratio surrogate, the exact KL, the update behind the KL constraint | VPG's toy |
 | 3 | `Surrogates/` | L^CPI, the fixed and adaptive KL penalties, L^CLIP | VPG's toy, TRPO's `mean_kl` |
-| 4 | `PPO/` | masked statistics, GAE, the four `loss_agg_mode`s, dual-clip policy loss, value loss, entropy, four KL estimators | — |
-| 5 | `GRPO/` | the group-relative advantage, and the Dr.GRPO flag | **your** PPO exercise |
+| 4 | `PPO/` | Part 1, core PPO: per-token log-probs, GAE, the clip per token, the value loss, entropy, and Algorithm 1 itself. Part 2, verl's extras: whitening, the four `loss_agg_mode`s, dual clip, clipped critic, the reference KL | VPG → Surrogates, for the ideas |
+| 5 | `GRPO/` | the group-relative advantage, and the Dr.GRPO flag | **your** PPO exercise, both parts |
 | 6 | `Agent0/` | the self-consistency vote, the gate, the curriculum reward | — |
 
 The terms each module's logs use are in its README (`VPG/README.md`,
-`TRPO/README.md`, `Surrogates/README.md`) or, for Agent0, in
+`TRPO/README.md`, `Surrogates/README.md`, `PPO/README.md`) or, for Agent0, in
 `./scripts/run_agent0.sh overview`.
 
 Each module has a reference implementation (`common.py`, or `vpg.py`,
@@ -89,7 +89,7 @@ pip install -r requirements.txt
 ./scripts/run_vpg.sh run          # new rollouts every update vs reusing one batch
 ./scripts/run_trpo.sh run         # TRPO vs VPG: safe reuse, KL constraint outside the loss
 ./scripts/run_surrogates.sh run   # every slot in one loop: the toy's Table 1 (~3 min)
-./scripts/run_ppo.sh run          # verl's PPO pieces on (batch, response_length) tensors
+./scripts/run_ppo.sh run          # Algorithm 1 on the token task, at verl's (batch, response_length) shapes
 ```
 
 `Agent0` adds three commands of its own, since it is the only module training
