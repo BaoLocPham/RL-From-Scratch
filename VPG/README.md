@@ -48,6 +48,11 @@ policy either answers directly or calls a search tool. Average rewards:
 | HARD | 0.2    | 1.0  |
 | EASY | 0.8    | 0.5  |
 
+- **state s_t**: the question's type, HARD or EASY. The code calls it `qtype`
+  (0 = HARD, 1 = EASY, one id per rollout), so π(a_t | s_t) is
+  `policy.dist(qtype)`. The toy's whole state is this one id; in an LLM it is
+  the prompt plus every token generated so far.
+- **action a_t**: answer directly or call the tool (`action`: 0 = answer, 1 = tool).
 - **p(tool|HARD)**: chance the policy calls the tool on a HARD question.
   Ideal 1.0, since search helps there.
 - **p(tool|EASY)**: chance it calls the tool on an EASY question. Ideal 0.0,

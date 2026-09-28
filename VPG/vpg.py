@@ -24,6 +24,11 @@ import torch.nn as nn
 HARD, EASY = 0, 1            # question types, drawn 50/50
 ANSWER, TOOL = 0, 1          # actions: answer directly, or call the search tool
 
+# `qtype` is the STATE s_t: which type of question came in, one id per rollout
+# (a tensor like [0, 1, 1, 0, ...]). `action` is a_t. So pi_theta(a_t | s_t) in
+# the equations is `policy.dist(qtype)` in the code, and `qtype` picks the row of
+# the policy's table. In an LLM the state is the prompt plus the tokens so far.
+
 # MEAN_REWARD[question type][action]: the reward you get ON AVERAGE.
 MEAN_REWARD = torch.tensor([
     [0.2, 1.0],              # HARD: answering directly is poor, searching is good
@@ -40,7 +45,7 @@ BEST_REWARD = 0.9
 
 
 class Policy(nn.Module):
-    """pi_theta(action | question type): the model we train.
+    """pi_theta(action | question type), i.e. pi_theta(a_t | s_t): the model we train.
 
     theta is just a 2x2 table of logits, one row per question type. The real
     thing would be an LLM; the table is enough to show every effect here.
@@ -52,7 +57,7 @@ class Policy(nn.Module):
         self.logits = nn.Parameter(torch.tensor([[0.6, 0.4], [0.6, 0.4]]).log())
 
     def dist(self, qtype):
-        """The action distribution for each question in `qtype` (a batch of type ids)."""
+        """pi_theta(. | s_t) for each rollout: `qtype` is the state, a batch of type ids."""
         return torch.distributions.Categorical(logits=self.logits[qtype])
 
     @torch.no_grad()

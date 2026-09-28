@@ -16,6 +16,8 @@ Try not to open ../trpo.py (the reference) -- the hints below are enough.
     subject to  mean over the batch of  KL[pi_theta_old(.|s), pi_theta(.|s)] <= delta   (eq. 4)
 
 The toy (Policy, collect_rollouts, ...) is VPG's, imported from VPG/vpg.py.
+`qtype` is the state s_t (0 = HARD, 1 = EASY, one per rollout), so pi(.|s) is
+`policy.dist(qtype)`, and `policy.logits[qtype]` picks each rollout's row.
 """
 
 import sys
