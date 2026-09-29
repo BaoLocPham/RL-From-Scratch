@@ -52,6 +52,38 @@ advantage comes from**:
 | `GRPO/` | the same L^CLIP, imported from `PPO/` | (reward − group mean) / group std | ε, inside the loss |
 | `Agent0/` | GRPO for the Curriculum Agent; ADPO for the Executor: L^CLIP with ε_high widened on hard questions | GRPO's, scaled by the question's difficulty | ε, set per question |
 
+### The whole path in one figure
+
+Every method on SimplePPO's three-turn toy, with the same rollouts and the same
+optimizer (SGD, lr 0.3, 20 seeds), and 50 epochs per batch for every method that
+reuses it. Regenerate it with `python SimplePPO/plot_path.py` (about five minutes).
+
+![True reward J against episodes used, for VPG with 1 and 50 epochs, TRPO, L^CPI, L^CLIP and PPO](PPO/ppo_path.png)
+
+| Method | Advantage | J after 60 iterations |
+|---|---|---|
+| VPG, 1 epoch per batch | episode reward − batch mean | 0.567 |
+| VPG, the batch reused 50 epochs | same | 0.839 |
+| L^CPI, no clip | same | 0.800 |
+| TRPO, δ 0.01 | same | 0.850 |
+| L^CLIP (Surrogates' winner) | same | **0.872** |
+| PPO: L^CLIP + critic + GAE | critic + GAE | 0.846 |
+
+- **Reusing each batch is the big win:** every method that reuses it beats one
+  step per batch by far.
+- **Reuse without a limit overshoots:** L^CPI ends lowest of the reusers and
+  stays noisy; plain VPG plateaus early.
+- **The limit makes heavy reuse safe:** TRPO's rollback does it, but climbs
+  the slowest of the reusers; the clip does it inside the loss, and ends highest.
+- **The critic doesn't pay on this toy.** Full PPO is slightly below the plain
+  clip. With three turns, 12 states and very noisy rewards, the critic stays
+  about 0.2 off the true values and lags the improving policy, so the batch
+  mean is as good a baseline. The critic earns its place on longer episodes;
+  on LLMs, where a response gets one reward, GRPO drops it altogether.
+- At 10 epochs instead of 50, nothing on this toy overshoots, and reused VPG
+  matches PPO (0.860 vs 0.854). The methods only separate once the batch is
+  pushed hard.
+
 Read top to bottom, the modules add one idea each: *which way* → *reuse the
 data* → *but stay close, cheaply* → *credit for several decisions* → *at LLM
 scale* → *without a critic* → *two agents teaching each other*.
@@ -97,6 +129,7 @@ pip install -r requirements.txt
 ./scripts/run_trpo.sh run         # TRPO vs VPG: safe reuse, KL constraint outside the loss
 ./scripts/run_surrogates.sh run   # every slot in one loop: the toy's Table 1 (~3 min)
 ./scripts/run_simple_ppo.sh run   # the paper's PPO on three decisions, minus each piece (~1 min)
+python SimplePPO/plot_path.py     # the whole path, VPG to PPO, on one toy: PPO/ppo_path.png (~5 min)
 ./scripts/run_ppo.sh run          # Algorithm 1 on the token task, at verl's (batch, response_length) shapes
 ```
 
