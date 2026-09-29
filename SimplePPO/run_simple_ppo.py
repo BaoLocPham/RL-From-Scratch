@@ -91,4 +91,5 @@ clip and the critic are what keep that reuse working as the problem grows.""")
     print(f"\nOne run (seed 0), learned p(search) -- HARD should search twice, EASY never:")
     for row in env.describe(policy):
         print(row)
-    print("\nNext: PPO/ -- the same algorithm for LLMs, where each step is a token and responses need masks.")
+    print("\nNext: SimpleGRPO/ -- the same agent with no critic, judged against a group of its own attempts.")
+    print("Then PPO/ -- the same algorithm for LLMs, where each step is a token and responses need masks.")

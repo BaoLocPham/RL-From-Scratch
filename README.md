@@ -15,25 +15,29 @@ paper.
 
 Two tracks. The first builds the PPO paper's argument (§2–§6) on a toy small
 enough to compute exactly: one decision per question, a 2×2 table of logits,
-then a three-turn version of the same agent for the paper's full PPO. The
+then a three-turn version of the same agent for the paper's full PPO and for
+GRPO. The
 second takes PPO to verl's LLM interface, `(batch, response_length)` tensors,
 and on to the algorithms built on top of it.
 
 ```
  TOY TRACK  (PPO paper §2–§6, the tool-calling agent)  LLM TRACK  (verl's core_algos.py API)
 
- 1 VPG/          L^PG: which way is uphill             5 PPO/     the same PPO for LLMs: tokens, masks;
+ 1 VPG/          L^PG: which way is uphill             6 PPO/     the same PPO for LLMs: tokens, masks;
      │           flaw: valid for one epoch only                   then verl's extras (Part 2)
      ▼                                                     │
  2 TRPO/         ratio + KL rollback: reuse safely         ▼
-     │           flaw: the limit is outside the loss   6 GRPO/    same slot; the advantage comes from a
-     ▼                                                     │      group of answers, no critic
+     │           flaw: the limit is outside the loss   7 GRPO/    SimpleGRPO's advantage at verl's
+     ▼                                                     │      shapes: uids, masks, a group of one
  3 Surrogates/   one loop, one slot, six candidates        ▼
-     │           the clip wins, and THAT is PPO        7 Agent0/  GRPO trains the question writer; ADPO
+     │           the clip wins, and THAT is PPO        8 Agent0/  GRPO trains the question writer; ADPO
      ▼                                                            (GRPO + difficulty scaling) the solver
  4 SimplePPO/    three decisions per question: a critic
      │           and GAE give each its credit; the paper's
-     │           full PPO, with no tokens or masks
+     ▼           full PPO, with no tokens or masks
+ 5 SimpleGRPO/   the same agent, no critic: each question
+     │           answered 8 times, each answer judged
+     │           against the others; plus a KL to π_ref
      └──────────────────────────────────────────────►
 ```
 
@@ -48,6 +52,7 @@ advantage comes from**:
 | `TRPO/` | L^CPI = r · Â (eq. 3), plus a rollback after every step | reward − batch mean | KL ≤ δ, checked outside the loss |
 | `Surrogates/` | L^CPI, fixed-β KL, adaptive-β KL, L^CLIP (eq. 5–8) | reward − batch mean | none, β (a price), d_targ, or ε |
 | `SimplePPO/` | L^CLIP + c1·L^VF − c2·S (eq. 9) | GAE, with a learned critic V(s) | ε, inside the loss |
+| `SimpleGRPO/` | the same L^CLIP, imported from `SimplePPO/`, + β·KL(π_θ ‖ π_ref) | (episode reward − group mean) / group std | ε, inside the loss |
 | `PPO/` | L^CLIP, verl's `compute_policy_loss` (+ dual-clip, asymmetric ε) | GAE, with a learned critic V(s) | ε, inside the loss |
 | `GRPO/` | the same L^CLIP, imported from `PPO/` | (reward − group mean) / group std | ε, inside the loss |
 | `Agent0/` | GRPO for the Curriculum Agent; ADPO for the Executor: L^CLIP with ε_high widened on hard questions | GRPO's, scaled by the question's difficulty | ε, set per question |
@@ -79,14 +84,16 @@ reuses it. Regenerate it with `python SimplePPO/plot_path.py` (about five minute
   clip. With three turns, 12 states and very noisy rewards, the critic stays
   about 0.2 off the true values and lags the improving policy, so the batch
   mean is as good a baseline. The critic earns its place on longer episodes;
-  on LLMs, where a response gets one reward, GRPO drops it altogether.
+  on LLMs, where a response gets one reward, GRPO drops it altogether
+  (`SimpleGRPO/` does that on this same agent).
 - At 10 epochs instead of 50, nothing on this toy overshoots, and reused VPG
   matches PPO (0.860 vs 0.854). The methods only separate once the batch is
   pushed hard.
 
 Read top to bottom, the modules add one idea each: *which way* → *reuse the
-data* → *but stay close, cheaply* → *credit for several decisions* → *at LLM
-scale* → *without a critic* → *two agents teaching each other*.
+data* → *but stay close, cheaply* → *credit for several decisions, from a
+critic* → *or from a group, without one* → *both at LLM scale* → *two agents
+teaching each other*.
 
 | # | Module | What you build in `from_scratch/` | Needs |
 |---|---|---|---|
@@ -94,16 +101,18 @@ scale* → *without a critic* → *two agents teaching each other*.
 | 2 | `TRPO/` | the ratio surrogate, the exact KL, the update behind the KL constraint | VPG's toy |
 | 3 | `Surrogates/` | L^CPI, the fixed and adaptive KL penalties, L^CLIP | VPG's toy, TRPO's `mean_kl` |
 | 4 | `SimplePPO/` | GAE, your clip per step, the value loss and entropy, the minibatch loop: the paper's PPO | Surrogates, for the clip |
-| 5 | `PPO/` | Part 1, core PPO: per-token log-probs, GAE, the clip per token, the value loss, entropy, and Algorithm 1 itself. Part 2, verl's extras: whitening, the four `loss_agg_mode`s, dual clip, clipped critic, the reference KL | VPG → Surrogates, for the ideas |
-| 6 | `GRPO/` | the group-relative advantage, and the Dr.GRPO flag | **your** PPO exercise, both parts |
-| 7 | `Agent0/` | the self-consistency vote, the gate, the curriculum reward | — |
+| 5 | `SimpleGRPO/` | the group advantage (and Dr.GRPO), the k3 KL to π_ref, the loop around your clip | SimplePPO, for the clip |
+| 6 | `PPO/` | Part 1, core PPO: per-token log-probs, GAE, the clip per token, the value loss, entropy, and Algorithm 1 itself. Part 2, verl's extras: whitening, the four `loss_agg_mode`s, dual clip, clipped critic, the reference KL | VPG → Surrogates, for the ideas |
+| 7 | `GRPO/` | the group-relative advantage at verl's shapes, and the Dr.GRPO flag | **your** PPO exercise, both parts; SimpleGRPO, for the idea |
+| 8 | `Agent0/` | the self-consistency vote, the gate, the curriculum reward | — |
 
 The terms each module's logs use are in its README (`VPG/README.md`,
-`TRPO/README.md`, `Surrogates/README.md`, `SimplePPO/README.md`, `PPO/README.md`) or, for Agent0, in
+`TRPO/README.md`, `Surrogates/README.md`, `SimplePPO/README.md`, `SimpleGRPO/README.md`,
+`PPO/README.md`) or, for Agent0, in
 `./scripts/run_agent0.sh overview`.
 
 Each module has a reference implementation (`common.py`, or `vpg.py`,
-`trpo.py`, `surrogates.py` and `simple_ppo.py` on the toy track), a literal walkthrough
+`trpo.py`, `surrogates.py`, `simple_ppo.py` and `simple_grpo.py` on the toy track), a literal walkthrough
 (`steps_*.py`), a runnable demonstration (`run_*.py`), and a staged exercise
 under `from_scratch/`. Read them in that order, but solve the exercise without
 opening the reference.
@@ -121,7 +130,7 @@ pip install -r requirements.txt
 ./scripts/run_vpg.sh diff       # prove yours matches the reference
 ```
 
-`run_trpo.sh`, `run_surrogates.sh`, `run_simple_ppo.sh`, `run_ppo.sh`, `run_grpo.sh` and
+`run_trpo.sh`, `run_surrogates.sh`, `run_simple_ppo.sh`, `run_simple_grpo.sh`, `run_ppo.sh`, `run_grpo.sh` and
 `run_agent0.sh` take the same commands. The demos:
 
 ```bash
@@ -129,6 +138,7 @@ pip install -r requirements.txt
 ./scripts/run_trpo.sh run         # TRPO vs VPG: safe reuse, KL constraint outside the loss
 ./scripts/run_surrogates.sh run   # every slot in one loop: the toy's Table 1 (~3 min)
 ./scripts/run_simple_ppo.sh run   # the paper's PPO on three decisions, minus each piece (~1 min)
+./scripts/run_simple_grpo.sh run  # GRPO on the same agent: Dr.GRPO, group size, no KL, vs PPO (~3 min)
 python SimplePPO/plot_path.py     # the whole path, VPG to PPO, on one toy: PPO/ppo_path.png (~5 min)
 ./scripts/run_ppo.sh run          # Algorithm 1 on the token task, at verl's (batch, response_length) shapes
 ```
@@ -152,6 +162,7 @@ python VPG/steps_vpg.py                python VPG/run_vpg.py                pyth
 python TRPO/steps_trpo.py              python TRPO/run_trpo.py              python TRPO/from_scratch/check.py
 python Surrogates/steps_surrogates.py  python Surrogates/run_surrogates.py  python Surrogates/from_scratch/check.py
 python SimplePPO/steps_simple_ppo.py   python SimplePPO/run_simple_ppo.py   python SimplePPO/from_scratch/check.py
+python SimpleGRPO/steps_simple_grpo.py python SimpleGRPO/run_simple_grpo.py python SimpleGRPO/from_scratch/check.py
 python PPO/steps_ppo.py                python PPO/run_ppo.py                python PPO/from_scratch/check.py
 python GRPO/steps_grpo.py              python GRPO/run_grpo.py              python GRPO/from_scratch/check.py
 python Agent0/steps_agent0.py          python Agent0/run_agent0.py          python Agent0/from_scratch/check.py

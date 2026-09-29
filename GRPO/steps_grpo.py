@@ -77,10 +77,12 @@ drgrpo = compute_grpo_outcome_advantage(rewards.clone(), response_mask, index,
 print(f"{'reward':>8}{'GRPO':>10}{'Dr.GRPO':>10}")
 for i in range(6):
     print(f"{rewards[i, 2]:>8.1f}{grpo[i, 0]:>10.4f}{drgrpo[i, 0]:>10.4f}")
-print("GRPO divides by the group std, so a group that happened to disagree a lot")
-print("produces smaller advantages than one that barely disagreed. That couples")
-print("update size to group variance, which correlates with response length.")
-print("Dr.GRPO drops the divide: norm_adv_by_std_in_grpo=False.")
+print("GRPO divides by the group std, so both groups get the same spread: p0's")
+print("0.1 gaps push as hard as p1's 5.0 gaps. A group that barely disagrees -- a")
+print("question nearly always or nearly never solved -- is weighted up. The Dr.GRPO")
+print("paper calls this question-difficulty bias; norm_adv_by_std_in_grpo=False")
+print("drops the divide and keeps each gap's size. Dr.GRPO's other change, against")
+print("response-length bias, is in the loss: agg_loss's seq-mean-token-sum-norm.")
 
 print("\n5. one advantage per response, copied across its tokens")
 print("advantages row 0:", grpo[0].tolist())

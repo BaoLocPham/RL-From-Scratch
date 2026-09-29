@@ -53,10 +53,14 @@ def compute_grpo_outcome_advantage(token_level_rewards, response_mask, index,
             ``non_tensor_batch["uid"]``.
         epsilon: added to the group std before dividing.
         norm_adv_by_std_in_grpo: ``True`` is GRPO. ``False`` subtracts the mean
-            without dividing, which is **Dr.GRPO** -- the single flag that paper
-            changes. Dividing by a per-group std makes the update size depend on
-            how much that group happened to disagree, which correlates with
-            response length and shows up as a length bias.
+            without dividing: one of the two changes **Dr.GRPO** makes. The
+            divide gives every group's advantages the same spread, however far
+            apart its rewards were, so a group that nearly agrees -- a question
+            nearly always solved, or nearly never -- is pushed as hard as an
+            open one. The Dr.GRPO paper calls this question-difficulty bias.
+            Its other change, against response-length bias, is not in this
+            function: it is how the loss is averaged over tokens, ``agg_loss``'s
+            ``"seq-mean-token-sum-norm"``.
 
     Both returned tensors are the same object: with outcome supervision there is
     nothing for a critic to regress against, so ``returns`` is meaningless here.

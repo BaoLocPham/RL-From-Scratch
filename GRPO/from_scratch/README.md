@@ -3,6 +3,10 @@
 Do not open `../common.py` first. Work from the docstring in `grpo.py` and the
 grader's messages.
 
+**Do `SimpleGRPO/` first** if you have not: it builds this same advantage on
+the toy, one group of attempts at a time, with no tokens, masks or uids. This
+exercise is that one at verl's shapes.
+
 **Finish `PPO/from_scratch/` first.** `grpo.py` imports your `agg_loss`,
 `compute_policy_loss` and `kl_penalty` from there, and this grader checks them.
 That is not an artificial dependency: in verl all of it lives in one
@@ -37,12 +41,26 @@ GRPO-specific.
    to regress, so `returns` is meaningless — verl returns the pair anyway so
    every estimator shares one signature.
 
-## One flag, one paper
+## One flag, half of Dr.GRPO
 
 `norm_adv_by_std_in_grpo=False` subtracts the group mean without dividing by the
-group std. That is [Dr.GRPO](https://arxiv.org/abs/2503.20783) in full. Dividing
-by a per-group std ties the update size to how much that group happened to
-disagree, which correlates with response length and shows up as a length bias.
+group std. That is one of the two changes
+[Dr.GRPO](https://arxiv.org/abs/2503.20783) makes to GRPO, one for each bias the
+paper finds:
+
+- **The std divide causes question-difficulty bias.** Dividing by each group's
+  std gives every question's advantages the same spread, however far apart its
+  rewards were. So a group that nearly agrees (a question nearly always solved,
+  or nearly never) is pushed as hard as an open one. This flag removes it.
+- **Per-response averaging causes response-length bias.** GRPO averages each
+  response's loss over its own length (the 1/|oᵢ| in its objective). A short
+  correct answer gets a bigger push per token, and a long wrong one a smaller
+  penalty per token, so wrong answers drift longer. That fix is not in this
+  function. It is `agg_loss`'s `"seq-mean-token-sum-norm"`, stage 8 of
+  `PPO/from_scratch/`, which divides by a constant instead.
+
+`SimpleGRPO/` shows the first bias on a toy: with groups of 2, the divide gets
+12 of 20 runs stuck, and Dr.GRPO none.
 
 GRPO itself is equation (3) of
 [DeepSeekMath](https://arxiv.org/abs/2402.03300); the implementation follows
