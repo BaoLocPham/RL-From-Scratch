@@ -36,10 +36,13 @@ def compute_grpo_outcome_advantage(token_level_rewards, response_mask, index,
             the same prompt and form one group. verl passes
             ``non_tensor_batch["uid"]`` here.
         norm_adv_by_std_in_grpo: ``True`` is GRPO. ``False`` subtracts the mean
-            and does NOT divide -- that is **Dr.GRPO**, the single flag that
-            paper changes. Dividing by a per-group std ties the update size to
-            how much that group happened to disagree, which correlates with
-            response length and shows up as a length bias.
+            and does NOT divide -- one of the two changes **Dr.GRPO** makes.
+            The divide gives every group's advantages the same spread, however
+            far apart its rewards were, so a group that nearly agrees (a
+            question nearly always solved, or nearly never) is pushed as hard
+            as an open one: question-difficulty bias. Dr.GRPO's other change,
+            against response-length bias, lives in the loss instead: your
+            ``agg_loss``'s ``"seq-mean-token-sum-norm"`` (PPO stage 8).
 
     Three details that are easy to get wrong:
 

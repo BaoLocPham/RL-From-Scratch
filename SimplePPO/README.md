@@ -123,6 +123,7 @@ An honest reading:
   question type, the batch mean is already a decent baseline. The critic's
   per-step credit pays off more as episodes grow. Its small gain is also why
   GRPO can drop the critic for LLMs, where a response gets one reward.
+  `SimpleGRPO/` drops it on this same agent, next.
 - **The clip doesn't help here.** At 10 epochs the unclipped ratio doesn't run
   far enough to hurt. `Surrogates/` shows where it matters: at 50 epochs,
   L^CPI gets 10 of 20 runs stuck and the clip gets none.
