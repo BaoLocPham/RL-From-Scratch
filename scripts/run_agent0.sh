@@ -4,7 +4,8 @@
 #
 # Sibling links drive the other modules; the module is taken from this script's
 # own filename: run_vpg.sh -> VPG, run_trpo.sh -> TRPO, run_surrogates.sh ->
-# Surrogates (every candidate for PPO's slot), run_ppo.sh -> PPO, run_grpo.sh -> GRPO.
+# Surrogates (every candidate for PPO's slot), run_simple_ppo.sh -> SimplePPO (the
+# paper's PPO on a multi-step toy), run_ppo.sh -> PPO, run_grpo.sh -> GRPO.
 #
 #   check     grade the module's from_scratch exercise, stopping at the first gap
 #   steps     the walkthrough, against the reference implementation
@@ -41,6 +42,7 @@ case "$STEM" in
     vpg)     MODULE=VPG ;;
     trpo)    MODULE=TRPO ;;
     surrogates) MODULE=Surrogates ;;
+    simple_ppo) MODULE=SimplePPO ;;
     *)      echo "unknown module: $STEM" >&2; exit 1 ;;
 esac
 

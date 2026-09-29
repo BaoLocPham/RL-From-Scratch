@@ -94,8 +94,11 @@ table 2 uses it.
 ## Then: PPO
 
 PPO = this loop + L^CLIP in the slot, plus (paper §5, eq. 9) a value-function
-loss to train the critic behind Â, an entropy bonus, and GAE advantages. `PPO/`
-has all of that the way verl writes it, for `(batch, response_length)` tensors.
+loss to train the critic behind Â, an entropy bonus, and GAE advantages.
+`SimplePPO/` builds exactly that next, on a three-turn version of this toy. It
+needs a critic because several decisions share one reward. `PPO/` then has
+the same algorithm the way verl writes it, for `(batch, response_length)`
+tensors.
 
 ## Terms
 

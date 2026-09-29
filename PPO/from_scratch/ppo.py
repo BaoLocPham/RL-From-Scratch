@@ -94,23 +94,84 @@ def compute_gae(token_level_rewards, values, response_mask, gamma, lam):
     of an agentic response -- must CARRY `nextvalues` and `lastgaelam` through
     unchanged, not reset them, so credit flows across it to the next real token.
     Reset them and every response with a tool call is silently cut in two.
+
+    ---------------------------------------------------------------- the intuition
+    delta_t is the critic's SURPRISE at step t. Before the token, the critic
+    predicted V(s_t). One step later it knows the reward r_t and can predict
+    V(s_{t+1}) instead. If r_t + gamma * V(s_{t+1}) is bigger than V(s_t), the
+    token made things better than expected: delta_t > 0.
+
+    A_t adds up the surprises from t onwards, each later one weighted by
+    another factor of gamma * lam:
+        A_t = delta_t + (gamma*lam) * delta_{t+1} + (gamma*lam)^2 * delta_{t+2} + ...
+    "How much better than expected did everything after this token turn out?",
+    trusting near surprises more than far ones.
+
+    lam slides between two advantages you already know:
+        lam = 0:  A_t = delta_t                        one step; trusts the critic completely
+        lam = 1:  A_t = (rewards from t on) - V(s_t)    the whole outcome minus the baseline --
+                                                        the toy track's reward - mean(reward),
+                                                        with the critic as the baseline
+    In between, lam trades the critic's bias (it may be wrong) against the
+    outcome's noise (one sampled response).
+
+    ---------------------------------------------------------------- the loop
+    Why backwards: A_t needs A_{t+1}, so start at the last position and reuse
+    each result for the one before it -- one pass instead of one sum per token.
+    Why no gradient: advantages and returns are fixed TARGETS, computed once
+    per batch; the losses in stages 3 and 4 must not push gradient into them.
+    Every `[:, t]` handles all responses in the batch at once; the loop is
+    over positions only.
+
+    The two variables carried from one iteration to the next ("next" means the
+    next REAL position to the right, since the loop runs right to left):
+        nextvalues   V of the next real position         (0 past the end: nothing follows)
+        lastgaelam   A of the next real position         (0 past the end)
+    and one temporary:
+        lastgaelam_  A at position t, IF position t is real -- the mask decides
+
+    Trace of the worked example (one row, gamma 0.9, lam 0.95, position 3 is padding):
+        start                                            nextvalues 0.0   lastgaelam 0.0
+        t=3 pad : delta = 0 + 0.9*0.0 - 0.4 = -0.40  -> ignored: both carried  0.0 / 0.0
+        t=2 real: delta = 1 + 0.9*0.0 - 0.3 =  0.70  A = 0.70                   0.3 / 0.70
+        t=1 real: delta = 0 + 0.9*0.3 - 0.2 =  0.07  A = 0.07 + 0.855*0.70     0.2 / 0.6685
+        t=0 real: delta = 0 + 0.9*0.2 - 0.1 =  0.08  A = 0.08 + 0.855*0.6685   0.1 / 0.6516
+        collected right to left [0.0, 0.70, 0.6685, 0.6516] -> reversed [0.6516, 0.6685, 0.70, 0.0]
+    The padding's delta (-0.40) is computed, but the mask throws it away.
     """
+    # No gradient: these are targets, computed once per batch (see "the loop" above).
     with torch.no_grad():
+        # Past the last position nothing follows, so V = 0 and A = 0 there.
+        # nextvalues = V of the next real position; lastgaelam = A of the next real position.
         nextvalues = 0
         lastgaelam = 0
+        # A_t for each position, collected right to left; reversed after the loop.
         advantages_reversed = []
         gen_len = token_level_rewards.shape[-1]
 
+        # Right to left: A_t is built from A_{t+1}, so the last position goes first.
         for t in reversed(range(gen_len)):
+            # delta: the critic's surprise at t. Reward now, plus the discounted guess one step
+            # later (nextvalues), minus the guess made before the token (values[:, t]).
             delta = ...              # TODO stage 2: eq. 12 at position t, using nextvalues
+            # This position's advantage: its own surprise plus the next real position's advantage,
+            # shrunk by gamma * lam. Only a candidate -- the mask below decides whether it counts.
             lastgaelam_ = ...        # TODO stage 2: eq. 11: delta plus the decayed carry
+            # The mask decides. Real token: this position becomes the new "next" for position t-1.
+            # Padding or tool output: skip it, and leave both carried values exactly as they were.
             here = response_mask[:, t]            # 1 where position t is real, 0 where it is not
             # Hint: `a * here + (1 - here) * b` means "a where real, keep b where not".
+            # From here on, V(s_{t+1}) for position t-1 is this position's value (if it is real).
             nextvalues = ...         # TODO stage 2: values[:, t] where real, else carry nextvalues
+            # ...and A_{t+1} for position t-1 is this position's advantage (if it is real).
             lastgaelam = ...         # TODO stage 2: lastgaelam_ where real, else carry lastgaelam
+            # On a masked position this appends the carried value; nothing downstream reads it.
             advantages_reversed.append(lastgaelam)
 
+        # Back to left-to-right order, one column per position: (batch, response_length).
         advantages = torch.stack(advantages_reversed[::-1], dim=1)
+        # returns: what the critic SHOULD have predicted at each position -- its baseline plus
+        # how much better things turned out. Stage 4 trains V towards it.
         returns = ...                # TODO stage 2: the advantage plus the baseline it was measured from
     return advantages, returns
 

@@ -44,8 +44,10 @@ for iteration:
 ```
 
 Where it sits: `VPG/` → `TRPO/` → `Surrogates/` (the toy track, one decision
-per question) → **`PPO/`** (T tokens per response, a critic) → `GRPO/` (the
-same loop without the critic) → `Agent0/`.
+per question) → `SimplePPO/` (the same PPO on three decisions, no tokens) →
+**`PPO/`** (T tokens per response, masks) → `GRPO/` (the same loop without the
+critic) → `Agent0/`. If this module feels like a big jump, do `SimplePPO/`
+first: Part 1 here is that module in LLM clothing.
 
 ### The files
 
@@ -79,7 +81,7 @@ same loop without the critic) → `Agent0/`.
 |---|---|---|---|
 | 1 | `logprobs_from_logits`, `masked_mean` | — | How does one decision become T tokens, and why must padding never reach a mean? |
 | 2 | `compute_gae` | eq. 11–12 | Which token earned a reward that arrives only at the end? Why is the mask not a `dones` flag? |
-| 3 | `ppo_clip_loss` | eq. 7 | Why does Surrogates' `min` become a `max`? |
+| 3 | `ppo_clip_loss` | eq. 7 | Why does Surrogates' `min` become a `max`? (see *Why the clip uses `max` here*, below) |
 | 4 | `value_loss` | eq. 9's L^VF | What is the critic trained to predict? |
 | 5 | `entropy_from_logits`, `entropy_bonus` | eq. 9's S | Why is a bonus subtracted from the loss? |
 | 6 | `compute_advantage`, `ppo_update` | Algorithm 1, eq. 9 | Can your pieces train something? |
@@ -148,7 +150,7 @@ The algorithm is the same.
 
 ## From the toy track to here
 
-| | Toy track (`Surrogates/`) | Here |
+| | Toy track (`Surrogates/`; `SimplePPO/` adds the critic and GAE) | Here |
 |---|---|---|
 | One rollout | one question, one action | a response of T tokens, `(batch, response_length)` |
 | log π | `policy.dist(qtype).log_prob(action)` | `logprobs_from_logits(logits, tokens)` |
@@ -157,6 +159,60 @@ The algorithm is the same.
 | The slot | `clip_loss` | `ppo_clip_loss` + `c1·value_loss` − `c2·entropy_bonus` (eq. 9) |
 | An update | the whole batch per step | minibatches of M, K epochs |
 | KL | to θ_old (TRPO, adaptive β) | also to a frozen reference model, in the reward |
+
+## Why the clip uses `max` here but `min` in Surrogates
+
+The paper's clipped objective (eq. 7) takes a **min**, and Surrogates'
+`clip_loss` does too. `ppo_clip_loss` takes a **max**. Both are right: they put
+the minus sign in different places.
+
+The paper **maximises** its objective; PyTorch **minimises**, so both files
+return the loss $-L^{CLIP}$. Negating a min flips it into a max:
+
+```
+-min(x, y) = max(-x, -y)
+```
+
+```python
+# Surrogates' clip_loss: objective terms, min, THEN negate
+unclipped = ratio * A                                   #  r·A
+clipped   = ratio.clamp(1 - eps, 1 + eps) * A           #  clip(r)·A
+loss = -torch.min(unclipped, clipped).mean()
+
+# PPO's ppo_clip_loss: negate FIRST, so the terms are loss terms, then max
+unclipped = -A * ratio                                  # -r·A
+clipped   = -A * torch.clamp(ratio, 1 - eps, 1 + eps)   # -clip(r)·A
+loss = masked_mean(torch.maximum(unclipped, clipped), mask)
+```
+
+The same numbers, for a good token with A = +3 whose ratio reached 1.5 (ε = 0.2):
+
+| | Surrogates: `min`, then negate | PPO: negate, then `max` |
+|---|---|---|
+| unclipped | 4.5 | −4.5 |
+| clipped | 3.6 | −3.6 |
+| combine | min = 3.6, negated → **−3.6** | max = **−3.6** |
+
+Identical loss, identical gradient. The trap is that **both files name the
+variables `unclipped` and `clipped`, but they hold opposite-signed values.** The
+rule:
+
+- terms **without** the minus sign (objective values) → the pessimistic choice is **`min`**, then negate;
+- terms **with** the minus sign inside (loss values) → the pessimistic choice is **`max`**.
+
+"Pessimistic" means the smaller objective, which is the larger loss. PPO uses
+the loss form because verl does. Part 2's `compute_policy_loss` works directly
+on the loss terms: `pg_clipfrac` counts where the clipped loss is the larger
+one, and the dual clip adds a third loss term to compare against.
+
+The same sign flip explains every term of eq. 9 in code:
+
+| | Objective (paper, maximised) | Loss (code, minimised) |
+|---|---|---|
+| pessimistic choice | `min` | `max` |
+| policy term | + L^CLIP | `pg_loss` = −L^CLIP |
+| value term | − c1·L^VF | `+ c1 * vf_loss` |
+| entropy term | + c2·S | `- c2 * entropy` |
 
 ## Two conventions, and most mistakes are really about one of them
 
