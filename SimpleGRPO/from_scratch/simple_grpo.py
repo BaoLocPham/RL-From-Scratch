@@ -51,6 +51,13 @@ def group_advantage(rewards, group_size, eps=1e-6, scale_by_std=True):
     are attempts at question 0, the next `group_size` at question 1, and so on.
     So `.view(-1, group_size)` puts each group in a row of its own.
 
+    Shapes, for the default batch of 2 questions x 8 attempts (see group_env.rollout):
+
+        rewards      (episodes, turns) = (16, 3)   rewards[i, t]: episode i's reward at turn t
+                                                   (-0.1 if it searched; +1 or -1 added on turn 2)
+        group_size   8: attempts per question, so episodes = questions * group_size = 2 * 8
+        returns      (episodes, turns) = (16, 3)   the advantage of every step
+
     Then every turn of episode i gets the same A_i. The reward says how the
     episode went, not which turn did it -- there is no per-step credit here, the
     thing GAE gave SimplePPO. `scale_by_std=False` skips the divide: that one
@@ -68,15 +75,25 @@ def group_advantage(rewards, group_size, eps=1e-6, scale_by_std=True):
     """
     with torch.no_grad():                               # a target, computed once per batch: no gradient
         # Outcome supervision: add each episode's rewards (the search costs and the answer) into one number.
+        # (episodes, turns) -> (episodes,): sum over dim 1, the turns. (16, 3) -> (16,)
         scores = ...                 # TODO stage 1: one total per episode, shape (episodes,)
         # One row per question, one column per attempt.
+        # (episodes,) -> (questions, group_size): (16,) -> (2, 8). groups[q, j] is attempt j at question q.
         groups = ...                 # TODO stage 1: reshape scores to (questions, group_size)
         # Better or worse than THIS question's average -- the group mean is the baseline, not a critic.
+        # groups.mean(1, keepdim=True) is (questions, 1) = (2, 1): one mean per row, kept as a column.
+        # (2, 8) - (2, 1) broadcasts that column across its row, so every attempt loses its OWN
+        # question's mean -> (2, 8). Without keepdim the mean is (2,), and (2, 8) - (2,) lines the 2 up
+        # with the LAST dim (8): an error -- or, when questions == group_size, the wrong means, silently.
         centred = ...                # TODO stage 1: subtract each row's mean (keepdim=True keeps it a column)
         if scale_by_std:
             # GRPO divides by the row's spread. torch.std's default is the sample (n - 1) std: keep it.
+            # groups.std(1, keepdim=True) is (2, 1) as well: (2, 8) / (2, 1) -> (2, 8).
             centred = ...            # TODO stage 1: divide by each row's std plus eps
-        # Back to one number per episode, then the same number on every turn: (episodes, turns).
+        # Back to one number per episode, then the same number on every turn:
+        # (2, 8) -> reshape(-1, 1) -> (16, 1): one column, in episode order (row 0's 8 attempts, then
+        # row 1's -- the order rollout stored them) -> expand_as(rewards) -> (16, 3), the column copied
+        # across the 3 turns.
         return ...                   # TODO stage 1: centred as a column, expanded to the shape of rewards
 
 
@@ -97,12 +114,22 @@ def kl_penalty(policy, states, actions, ref_logp):
     `ref_logp` is log pi_ref(a_t | s_t), recorded at rollout. Take log pi_theta
     from the policy, so the penalty carries gradient.
 
+    Shapes, for one minibatch of M steps (M = 16 in grpo_update; each step is one decision):
+
+        states       (M,)  long, state ids 0..11 (see env.state_id)
+        actions      (M,)  long, 0 = SKIP, 1 = SEARCH: the action each step took
+        ref_logp     (M,)  float, log pi_ref(a_t | s_t)
+        policy.dist(states)                     M Categoricals over the 2 actions, one per state
+        policy.dist(states).log_prob(actions)   (M,)  log pi_theta(a_t | s_t), the action each one took
+        returns      ()    a scalar: the mean over the M steps
+
     Worked example, pi_theta(search) = 0.6, pi_ref(search) = 0.4:
         took SEARCH: x = 0.4 / 0.6 = 0.667 -> 0.667 + 0.405 - 1 = 0.0721
         took SKIP:   x = 0.6 / 0.4 = 1.5   -> 1.5   - 0.405 - 1 = 0.0945
         averaged by pi_theta: 0.6 * 0.0721 + 0.4 * 0.0945 = 0.0811 = the exact KL
     """
     # Hint: work in logs. log(pi_ref / pi_theta) = ref_logp - log pi_theta; torch.exp undoes the log.
+    # (M,) - (M,) -> (M,): one log-ratio per step. Then k3 elementwise, (M,), and .mean() -> ().
     log_ratio = ...          # TODO stage 2: log(pi_ref / pi_theta) for each step's action
     return ...               # TODO stage 2: the mean of exp(log_ratio) - log_ratio - 1
 
@@ -118,6 +145,16 @@ def grpo_update(policy, optimizer, batch, epochs=10, minibatch_size=16, eps=0.2,
 
     policy_loss is your SimplePPO clip, imported at the top of this file.
     Returns each loss term averaged over every update.
+
+    Shapes, for the default batch of 2 questions x 8 attempts:
+
+        batch["states"], batch["actions"]          (episodes, turns) = (16, 3), long
+        batch["old_logp"], batch["ref_logp"]       (16, 3), float: log pi_old and log pi_ref of each action
+        batch["advantages"]                        (16, 3), float: stage 1's output
+        steps[key]     (episodes * turns,) = (48,): the same, flattened, one sample per decision
+        idx            (minibatch_size,) = (16,): positions into those 48 (48 = 3 minibatches of 16)
+        steps[key][idx]    (16,): this minibatch's samples
+        pg, kl, loss   ()  scalars
     """
     # Every step of an episode has its episode's advantage, so time no longer matters:
     # flatten (episodes, turns) -> (steps,). Given.
@@ -130,6 +167,7 @@ def grpo_update(policy, optimizer, batch, epochs=10, minibatch_size=16, eps=0.2,
             idx = order[start:start + minibatch_size]
             pg = policy_loss(policy, steps["states"][idx], steps["actions"][idx], steps["old_logp"][idx],
                              steps["advantages"][idx], eps)
+            # steps["states"][idx], steps["actions"][idx], steps["ref_logp"][idx]: (16,) each -> kl: ()
             kl = ...                 # TODO stage 3: your stage 2 on this minibatch (states, actions, ref_logp)
             loss = ...               # TODO stage 3: the clip loss plus beta times the KL
 

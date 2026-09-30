@@ -7,6 +7,7 @@ SimpleGRPO/from_scratch/simple_grpo.py, and ``./scripts/run_simple_grpo.sh diff`
 to compare the two outputs line by line.
 """
 
+import itertools
 import math
 import os
 import sys
@@ -35,8 +36,78 @@ def row(t):
     return [f(v) for v in t]
 
 
+def value(qtype, searches):
+    """E[R | question type, searches]: 2 * p(correct) - 1 for the answer, minus 0.1 per search."""
+    return 2 * float(env.P_CORRECT[qtype, searches]) - 1 - env.SEARCH_COST * searches
+
+
+def sequences(policy, qtype):
+    """Every action sequence for one question type: (actions, probability, searches, E[R])."""
+    probs = policy.logits.softmax(-1).detach()
+    out = []
+    for actions in itertools.product((env.SKIP, env.SEARCH), repeat=env.TURNS):
+        chance, searches = 1.0, 0
+        for turn, action in enumerate(actions):
+            chance *= float(probs[env.state_id(qtype, turn, searches), action])   # pi(a_t | s_t)
+            searches += action
+        out.append((actions, chance, searches, value(qtype, searches)))
+    return out
+
+
+def j_of_type(policy, qtype):
+    """E[R | question type]: the sum over its 8 action sequences, each weighted by its probability."""
+    return sum(chance * v for _, chance, _, v in sequences(policy, qtype))
+
+
 # ---------------------------------------------------------------- step 1
-banner("STEP 1  one question, answered four times: a group")
+banner("STEP 1  the goal: J(theta), the average total reward of one attempt")
+print("""  One attempt: a question (HARD or EASY, 50/50), three choices (SEARCH or SKIP),
+  then the answer. With k = the number of searches, its total reward is
+
+      R = (+1 if the answer is right, -1 if it is wrong) - 0.1 * k
+
+  The chance p of being right depends on the question and on k, so the AVERAGE reward
+  of an attempt that searched k times is
+
+      E[R | q, k] = (+1) * p + (-1) * (1 - p) - 0.1 * k = 2p - 1 - 0.1 * k
+""")
+print(f"  {'':<5} {'k searches':>10} | {'p(right)':>8} | {'2p - 1':>6} | {'- 0.1 k':>7} | {'E[R | q, k]':>11}")
+for qtype, name in ((env.HARD, "HARD"), (env.EASY, "EASY")):
+    for k in range(env.TURNS + 1):
+        p = float(env.P_CORRECT[qtype, k])
+        best = "   <- best" if (qtype, k) in ((env.HARD, 2), (env.EASY, 0)) else ""
+        print(f"  {name if k == 0 else '':<5} {k:>10} | {p:>8.2f} | {2 * p - 1:>6.2f} | {-0.1 * k + 0.0:>7.1f} | "
+              f"{value(qtype, k):>11.2f}{best}")
+print("""  (HARD with one search is the coin flip: +1 - 0.1 = +0.9 or -1 - 0.1 = -1.1, on average -0.1.)
+
+  J averages that over everything random: the question type, and the policy's three choices.
+  Each choice is made in the state s_t = (question type, turn t, searches so far):
+
+      J(theta) = sum over q of 0.5 * sum over (a0, a1, a2) of
+                 pi(a0 | s0) * pi(a1 | s1) * pi(a2 | s2) * E[R | q, k = a0 + a1 + a2]
+
+  2 question types x 2^3 action sequences = 16 terms. At the start, p(search) = 0.4 in every
+  state. The 8 terms for HARD:""")
+start = env.Policy()
+names = {env.SKIP: "SKIP", env.SEARCH: "SEARCH"}
+print(f"    {'actions':<22} | {'probability':<24} | k | {'E[R | HARD, k]':>14} | {'product':>7}")
+for actions, chance, k, v in sequences(start, env.HARD):
+    factors = " x ".join("0.4" if a == env.SEARCH else "0.6" for a in actions)
+    print(f"    {' '.join(names[a] for a in actions):<22} | {factors} = {chance:.3f} | {k} | {v:>14.2f} | "
+          f"{chance * v:>+7.4f}")
+hard, easy = j_of_type(start, env.HARD), j_of_type(start, env.EASY)
+print(f"    {'':<22}   {'':<24}   {'':<1}   {'E[R | HARD] =':>14} {hard:>+7.4f}")
+print(f"""  The same 8 terms for EASY give E[R | EASY] = {easy:.4f}.
+      J = 0.5 * {hard:.4f} + 0.5 * {easy:.4f} = {0.5 * hard + 0.5 * easy:.3f}      env.true_reward: {env.true_reward(start):.3f}
+  The best policy searches twice on HARD (0.8) and never on EASY (1.0):
+      J* = 0.5 * 0.8 + 0.5 * 1.0 = {env.BEST_J}
+  Training never sees J: it sees single rewards, each a coin flip. J is computed exactly
+  here only because the toy is tiny (env.true_reward is this sum); on an LLM it can only
+  be estimated, by sampling. Every "J" printed below and in run_simple_grpo.py is this sum.""")
+
+
+# ---------------------------------------------------------------- step 2
+banner("STEP 2  one question, answered four times: a group")
 print("""  A HARD question (it needs two searches). The policy attempts it 4 times. Each search
   costs 0.1; the answer is graded right (+1) or wrong (-1), like a math checker.
 
@@ -50,15 +121,52 @@ print("""  A HARD question (it needs two searches). The policy attempts it 4 tim
   it asks how each attempt did compared with the OTHER attempts at the same question.""")
 rewards = torch.tensor([[-0.1, -0.1, 1.0], [0.0, 0.0, -1.0], [-0.1, 0.0, -1.0], [0.0, -0.1, 0.9]])
 
-# ---------------------------------------------------------------- step 2
-banner("STEP 2  the group advantage: A_i = (R_i - mean(R)) / std(R)")
+# ---------------------------------------------------------------- step 3
+banner("STEP 3  the group advantage: A_i = (R_i - mean(R)) / std(R), one line of code at a time")
+print("  group_advantage(rewards, group_size=4) does five things. The numbers for step 2's group:")
+
+print("\n  (a) scores = rewards.sum(1): add each attempt's rewards into ONE number, its total R")
 totals = rewards.sum(1)
-mean, std = float(totals.mean()), float(totals.std())
-print(f"  totals R = {row(totals)}   (outcome supervision: one number per attempt)")
-print(f"  mean = {mean:.3f}")
-print(f"  std  = sqrt(sum((R - mean)^2) / (4 - 1)) = {std:.4f}   (the sample std, as torch.std)")
-for i, r in enumerate(totals.tolist()):
-    print(f"  A_{i + 1} = ({r:+.1f} - ({mean:.3f})) / {std:.4f} = {(r - mean) / std:+.3f}")
+for i in range(4):
+    terms = " + ".join(f"({float(r):+.1f})" for r in rewards[i])
+    print(f"      attempt {i + 1}: {terms} = {float(totals[i]):+.1f}")
+print("      GRPO never looks at the turns again: outcome supervision, one grade per attempt.")
+
+print("\n  (b) groups = scores.view(-1, group_size): one row per question, one column per attempt")
+print(f"      {tuple(totals.shape)} -> {tuple(totals.view(-1, 4).shape)}: [{', '.join(f'{float(r):+.1f}' for r in totals)}]")
+print("      One question here; a batch of 2 questions x 8 attempts would be (16,) -> (2, 8), and each")
+print("      row would get its own mean and std in (c) and (d).")
+
+print("\n  (c) centred = groups - groups.mean(1, keepdim=True): better or worse than THIS question's average")
+mean = float(totals.mean())
+print(f"      mean = ({' + '.join(f'({float(r):+.1f})' for r in totals)}) / 4 = {float(totals.sum()):+.1f} / 4 = {mean:+.3f}")
+deviations = totals - mean
+for i in range(4):
+    print(f"      attempt {i + 1}: {float(totals[i]):+.1f} - ({mean:+.3f}) = {float(deviations[i]):+.3f}")
+print("      The mean plays the part of SimplePPO's critic V(s_0): how an average attempt at this")
+print("      question goes, estimated from the attempts themselves.")
+print("      Dr.GRPO stops here: its advantages are these centred rewards.")
+
+print("\n  (d) centred / (groups.std(1, keepdim=True) + eps): put every question on the same scale")
+squares = deviations ** 2
+print("      std = sqrt( sum of (R - mean)^2 / (n - 1) ), with n = 4 attempts:")
+print("      squares: " + ",  ".join(f"({float(d):+.3f})^2 = {float(q):.4f}" for d, q in zip(deviations, squares)))
+variance = float(squares.sum()) / 3
+std = variance ** 0.5
+print(f"      sum = {float(squares.sum()):.4f};   / (4 - 1) = {variance:.4f};   sqrt = {std:.4f}")
+print(f"      n - 1, not n: torch.std's default, the sample std (dividing by 4 would give "
+      f"{float(totals.std(unbiased=False)):.4f}).")
+print("      eps = 1e-6 is added to the std only so a group with std 0 (step 6) does not divide by 0.")
+for i in range(4):
+    print(f"      A_{i + 1} = {float(deviations[i]):+.3f} / {std:.4f} = {float(deviations[i]) / std:+.3f}")
+scaled = deviations / std
+print(f"      check: the A's sum to {f(scaled.sum()):.3f} and their std is {f(scaled.std()):.3f}. Every group")
+print("      comes out with mean 0 and std 1, whatever its rewards were.")
+
+print("\n  (e) centred.reshape(-1, 1).expand_as(rewards): the same A_i on every turn of attempt i")
+print(f"      {tuple(scaled.shape)} -> reshape(-1, 1) -> (4, 1), one column -> expand_as(rewards) -> "
+      f"{tuple(rewards.shape)}:")
+print("      the column is copied across the 3 turns.")
 advantages = group_advantage(rewards, 4)
 print(f"  group_advantage -> (attempts, turns) =")
 for i in range(4):
@@ -69,8 +177,8 @@ print("""  Every turn of an attempt carries the same number. Attempt 1's final S
   here there is nothing to tell them apart. Over many attempts the credit still sorts
   itself out: turns that help show up more often in the attempts that did well.""")
 
-# ---------------------------------------------------------------- step 3
-banner("STEP 3  why a group, and not the whole batch")
+# ---------------------------------------------------------------- step 4
+banner("STEP 4  why a group, and not the whole batch")
 easy = torch.tensor([[0.0, 0.0, 1.0], [-0.1, 0.0, 1.0], [0.0, 0.0, 1.0], [0.0, -0.1, 1.0]])
 both = torch.cat([rewards, easy])
 print(f"  add an EASY question's group: totals {row(easy.sum(1))}   (two wasted a search, 0.9)")
@@ -83,8 +191,8 @@ print("""  Against the batch, every EASY attempt looks good -- even the ones tha
   below average. The group mean is a baseline for THIS question: what a critic's V(s_0)
   would estimate, taken from the attempts themselves.""")
 
-# ---------------------------------------------------------------- step 4
-banner("STEP 4  the std divide, and Dr.GRPO (scale_by_std=False)")
+# ---------------------------------------------------------------- step 5
+banner("STEP 5  the std divide, and Dr.GRPO (scale_by_std=False)")
 pairs = torch.tensor([[-0.1, 0.0, 1.0], [-0.1, -0.1, 1.0], [-0.1, 0.0, -1.0], [-0.1, -0.1, 1.0]])
 print("  groups of two, on a HARD question: one search vs two searches")
 print(f"    lucky coin: 1 search right (0.9) vs 2 searches (0.8)  GRPO {row(group_advantage(pairs[:2], 2)[:, 0])}"
@@ -101,16 +209,16 @@ print(f"    GRPO {row(group_advantage(nearly, 4)[:, 0])}   Dr.GRPO "
 print("  The divide blows a 0.1 difference up to full size, and keeps pushing a nearly settled")
 print("  question as hard as an open one.")
 
-# ---------------------------------------------------------------- step 5
-banner("STEP 5  a dead group: every attempt scored the same")
+# ---------------------------------------------------------------- step 6
+banner("STEP 6  a dead group: every attempt scored the same")
 solved = torch.tensor([[0.0, 0.0, 1.0]] * 4)
 print(f"  totals {row(solved.sum(1))}: mean 1.0, std 0 -> A = 0 / (0 + eps) = {row(group_advantage(solved, 4)[:, 0])}")
 print("""  No attempt was better than another, so the group teaches nothing: its whole gradient is
   zero. Once a question is solved every group of it is dead; DAPO's dynamic sampling
   throws such groups away and samples new questions. run_simple_grpo.py counts them.""")
 
-# ---------------------------------------------------------------- step 6
-banner("STEP 6  the loss: SimplePPO's clip, plus beta * KL(pi_theta || pi_ref)")
+# ---------------------------------------------------------------- step 7
+banner("STEP 7  the loss: SimplePPO's clip, plus beta * KL(pi_theta || pi_ref)")
 print("  k3, DeepSeekMath's eq. 4, on the action taken: x - log x - 1, with x = pi_ref / pi_theta")
 probe = env.Policy()
 with torch.no_grad():
@@ -142,12 +250,15 @@ print(f"  grpo_update: 10 epochs x 3 minibatches of 16 = 30 steps, mean kl {metr
       f"J {env.true_reward(env.Policy()):.3f} -> {env.true_reward(policy):.3f}")
 print("  No value loss, no entropy bonus, no critic to train: one network, one loss.")
 
-# ---------------------------------------------------------------- step 7
-banner("STEP 7  the whole loop: 60 iterations of 2 questions x 8 attempts (seed 0)")
+# ---------------------------------------------------------------- step 8
+banner("STEP 8  the whole loop: 60 iterations of 2 questions x 8 attempts (seed 0)")
 import simple_grpo as impl  # noqa: E402  (whichever implementation was imported above)
 curve, policy, dead = env.train(impl, seed=0)
 print(f"  true J: {curve[0]:.3f} after 1, {curve[9]:.3f} after 10, {curve[29]:.3f} after 30, "
       f"{curve[-1]:.3f} after 60.   best possible {env.BEST_J}")
+hard, easy = j_of_type(policy, env.HARD), j_of_type(policy, env.EASY)
+print(f"  step 1's sum on the learned policy: J = 0.5 * {hard:.3f} (HARD, best 0.8) + 0.5 * {easy:.3f} "
+      f"(EASY, best 1.0) = {0.5 * hard + 0.5 * easy:.3f}")
 print("  learned p(search):")
 for line in env.describe(policy):
     print("  " + line)

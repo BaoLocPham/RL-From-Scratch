@@ -52,8 +52,21 @@ then it answers, with the same 12 states and the same 12 × 2 table of logits.
 
 Its average, 2·p − 1, is exactly SimplePPO's answer quality. So the true J, the
 best policy (search twice on HARD, never on EASY) and J = 0.90 are all the same
-as SimplePPO's. Only the noise differs: a coin instead of a bell curve. That
-makes whole groups tie, which is one of GRPO's real behaviours (step 5).
+as SimplePPO's.
+
+**J**, the true reward every table here reports, is the average total reward of
+one attempt, with k = a₀ + a₁ + a₂ searches and each choice made in its state
+s_t = (question type, turn, searches so far):
+
+```
+J(θ) = Σ_q ½ · Σ_(a₀,a₁,a₂)  π(a₀|s₀) · π(a₁|s₁) · π(a₂|s₂) · (2·p(right | q, k) − 1 − 0.1·k)
+```
+
+That is 2 question types × 8 action sequences = 16 terms, summed exactly by
+`env.true_reward`. Training never sees it, only single coin-flip rewards. Step 1
+of the walkthrough works it through: the starting policy scores 0.388, and the
+best 0.5 × 0.8 + 0.5 × 1.0 = 0.90. Only the noise differs: a coin instead of a bell curve. That
+makes whole groups tie, which is one of GRPO's real behaviours (step 6).
 
 ## The stages
 
@@ -114,7 +127,7 @@ An honest reading:
   anyway.
 - **Groups beat the batch mean by nothing here.** With two question types,
   which the policy sees, one batch-wide baseline is already fair. Groups pay
-  when every prompt has its own difficulty, as in an LLM's dataset. Step 3 of
+  when every prompt has its own difficulty, as in an LLM's dataset. Step 4 of
   the walkthrough shows the bias they remove.
 - **PPO's critic wins on this toy** (0.869 vs 0.839). GRPO's case isn't accuracy
   here. It is the critic it doesn't need: on an LLM, that is a second model as
