@@ -45,8 +45,9 @@ for iteration:
 
 Where it sits: `VPG/` → `TRPO/` → `Surrogates/` (the toy track, one decision
 per question) → `SimplePPO/` (the same PPO on three decisions, no tokens) →
-`SimpleGRPO/` (the same agent without the critic) → **`PPO/`** (T tokens per
-response, masks) → `GRPO/` (SimpleGRPO at verl's shapes) → `Agent0/`. If this module feels like a big jump, do `SimplePPO/`
+`SimpleGRPO/` (the same agent without the critic) → `SimpleDPO/` (the same
+agent without a reward) → **`PPO/`** (T tokens per response, masks) → `GRPO/`
+(SimpleGRPO at verl's shapes) → `DPO/` (SimpleDPO at verl's shapes) → `Agent0/`. If this module feels like a big jump, do `SimplePPO/`
 first: Part 1 here is that module in LLM clothing.
 
 ### The files

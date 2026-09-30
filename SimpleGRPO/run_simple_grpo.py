@@ -122,4 +122,5 @@ Reading it:
         print(row)
     print(f"dead groups: {dead[0]:.2f} of the first batch, {sum(dead[-10:]) / 10:.2f} of the last ten: "
           "once a question is solved, its group agrees and goes quiet.")
-    print("\nNext: GRPO/ -- the same advantage for LLMs, at verl's (batch, response_length) shapes.")
+    print("\nNext: SimpleDPO/ -- the same agent with no reward at all, only which of two attempts won.")
+    print("Then GRPO/ -- the same advantage for LLMs, at verl's (batch, response_length) shapes.")
