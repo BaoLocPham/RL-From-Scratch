@@ -33,8 +33,8 @@ GRPO and for DPO. The second takes PPO to verl's LLM interface,
      │           the clip wins, and THAT is PPO         9 DPO/     SimpleDPO's loss as verl's online-DPO
      ▼                                                      │      (SPIN) recipe writes it: pairs, labels
  4 SimplePPO/    three decisions per question: a critic     ▼
-     │           and GAE give each its credit; the     10 Agent0/  GRPO trains the question writer; ADPO
-     ▼           paper's full PPO, no tokens or masks              (GRPO + difficulty scaling) the solver
+     │           and GAE give each its credit; the     10 Agent0/  back to a toy: GRPO trains the question
+     ▼           paper's full PPO, no tokens or masks              writer, ADPO the solver, both just logits
  5 SimpleGRPO/   the same agent, no critic: each question
      │           answered 8 times, each answer judged
      ▼           against the others; plus a KL to π_ref
@@ -59,7 +59,7 @@ advantage comes from**:
 | `PPO/` | L^CLIP, verl's `compute_policy_loss` (+ dual-clip, asymmetric ε) | GAE, with a learned critic V(s) | ε, inside the loss |
 | `GRPO/` | the same L^CLIP, imported from `PPO/` | (reward − group mean) / group std | ε, inside the loss |
 | `SimpleDPO/`, `DPO/` | −log σ(β·logits), logits = [log π − log π_ref](chosen) − [log π − log π_ref](rejected) | none: only which of two attempts won | β, through π_ref inside the loss |
-| `Agent0/` | GRPO for the Curriculum Agent; ADPO for the Executor: L^CLIP with ε_high widened on hard questions | GRPO's, scaled by the question's difficulty | ε, set per question |
+| `Agent0/` | L^CLIP for both agents; ADPO widens ε_high on hard questions | GRPO's; ADPO scales it by s(p̂), how far the label can be trusted | ε; ADPO's ε_high set per question |
 
 DPO is the one that leaves the loop: there is no advantage and no θ_old, and
 by default no rollouts while training. The pairs replace all three, and π_ref
@@ -114,15 +114,14 @@ reward* → *all three at LLM scale* → *two agents teaching each other*.
 | 7 | `PPO/` | Part 1, core PPO: per-token log-probs, GAE, the clip per token, the value loss, entropy, and Algorithm 1 itself. Part 2, verl's extras: whitening, the four `loss_agg_mode`s, dual clip, clipped critic, the reference KL | VPG → Surrogates, for the ideas |
 | 8 | `GRPO/` | the group-relative advantage at verl's shapes, and the Dr.GRPO flag | **your** PPO exercise, both parts; SimpleGRPO, for the idea |
 | 9 | `DPO/` | verl's online-DPO recipe: the pairs from rewards, `get_batch_logps`, the loss with label smoothing and IPO | SimpleDPO, for the idea |
-| 10 | `Agent0/` | the self-consistency vote, the gate, the curriculum reward | — |
+| 10 | `Agent0/` | the paper's Eq. 2–8: self-consistency, the Curriculum Agent's reward R_C, the curation band, ADPO's scale and clip | SimpleGRPO, for the idea |
 
 The terms each module's logs use are in its README (`VPG/README.md`,
 `TRPO/README.md`, `Surrogates/README.md`, `SimplePPO/README.md`, `SimpleGRPO/README.md`,
-`SimpleDPO/README.md`, `PPO/README.md`, `DPO/from_scratch/README.md`) or, for Agent0, in
-`./scripts/run_agent0.sh overview`.
+`SimpleDPO/README.md`, `PPO/README.md`, `DPO/from_scratch/README.md`, `Agent0/README.md`).
 
 Each module has a reference implementation (`common.py`, or `vpg.py`,
-`trpo.py`, `surrogates.py`, `simple_ppo.py`, `simple_grpo.py` and `simple_dpo.py` on the toy track), a literal walkthrough
+`trpo.py`, `surrogates.py`, `simple_ppo.py`, `simple_grpo.py`, `simple_dpo.py` and `agent0.py` on toys), a literal walkthrough
 (`steps_*.py`), a runnable demonstration (`run_*.py`), and a staged exercise
 under `from_scratch/`. Read them in that order, but solve the exercise without
 opening the reference.
@@ -155,18 +154,6 @@ python SimplePPO/plot_path.py     # the whole path, VPG to PPO, on one toy: PPO/
 ./scripts/run_dpo.sh run          # verl's online DPO on the same token task, and the recipe's knobs
 ```
 
-`Agent0` adds three commands of its own, since it is the only module training
-two agents:
-
-```bash
-./scripts/run_agent0.sh overview     # the iteration flow, and a glossary
-./scripts/run_agent0.sh trace        # one question through Step 3 and Step 4
-./scripts/run_agent0.sh curriculum   # or executor, for one half at a time
-```
-
-Start with `overview`: it draws what generates what, who is frozen, and where
-weights actually move, then defines every term the other scripts print.
-
 Or call the files directly:
 
 ```bash
@@ -182,20 +169,12 @@ python DPO/steps_dpo.py                python DPO/run_dpo.py                pyth
 python Agent0/steps_agent0.py          python Agent0/run_agent0.py          python Agent0/from_scratch/check.py
 ```
 
-`Agent0/` has one walkthrough per agent, and `steps_agent0.py` runs both in
-dependency order:
-
-```bash
-python Agent0/steps_curriculum.py   # the proposer -- writes questions, GRPO
-python Agent0/steps_executor.py    # the solver   -- answers them, ADPO
-```
-
 Set `RL_IMPL=scratch` to run any walkthrough against your own implementation
 once its grader passes.
 
 ## The LLM track's convention
 
-On the LLM track, everything outside `Agent0/`'s reward layer is `(batch, response_length)`, and
+On the LLM track (`PPO/`, `GRPO/`, `DPO/`), everything is `(batch, response_length)`, and
 `response_mask` is the only thing that makes a position real. There is no
 per-sequence scalar: one outcome reward for a whole response is a row that is
 zero except at its last valid position. Every mean, variance and loss is taken
@@ -227,7 +206,7 @@ log_prob = torch.log_softmax(logits, -1).gather(-1, responses.unsqueeze(-1)).squ
 ```
 
 That `(batch, response_length)` tensor, with `response_mask`, is what `PPO/`,
-`GRPO/` and `Agent0/` take. The toy is the case R = 1, V = 2.
+`GRPO/` and `DPO/` take. The toy is the case R = 1, V = 2.
 
 What gets harder is the engineering, not the math:
 
@@ -261,10 +240,10 @@ recipe instead, now in
 `DPO/from_scratch/README.md` notes one place where that recipe's labels and its
 reference log-probs cover different tokens.
 
-The exercises were designed against the real code in verl, verl-recipe and
-[aiming-lab/Agent0](https://github.com/aiming-lab/Agent0), which each module
-cites by path in its docstrings. Where that code and its write-ups disagree,
-this repo follows the code and says so in a comment — `Agent0/from_scratch/README.md`
-lists four such places. Live model sampling, vLLM, the code sandbox and
-sympy-based answer grading are deliberately represented by deterministic values
-or by callbacks supplied by the caller.
+The LLM-track exercises were designed against the real code in verl and
+verl-recipe, which each module cites by path in its docstrings. Where that code
+and its write-ups disagree, this repo follows the code and says so in a
+comment. `Agent0/` is different: it implements the
+[Agent0 paper](https://arxiv.org/abs/2511.16043)'s equations on a toy where
+both agents are small tables of logits, with no model sampling, code sandbox or
+answer parsing (see `Agent0/README.md`).
