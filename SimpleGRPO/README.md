@@ -150,6 +150,9 @@ An honest reading:
 So `GRPO/`'s exercise is this stage 1 at verl's shapes. It adds no new
 algorithm, only the bookkeeping.
 
+Next on the toy track, `SimpleDPO/` takes away the reward too: the same agent,
+two attempts per question, and only a rater's verdict on which was better.
+
 ## Terms
 
 The PPO terms are in `SimplePPO/README.md`. This module adds:
