@@ -7,7 +7,7 @@
 # Surrogates (every candidate for PPO's slot), run_simple_ppo.sh -> SimplePPO (the
 # paper's PPO on a multi-step toy), run_simple_grpo.sh -> SimpleGRPO (GRPO on the
 # same toy), run_simple_dpo.sh -> SimpleDPO (DPO on the same toy), run_ppo.sh ->
-# PPO, run_grpo.sh -> GRPO, run_dpo.sh -> DPO.
+# PPO, run_grpo.sh -> GRPO, run_dpo.sh -> DPO, run_gzero.sh -> GZero.
 #
 #   check     grade the module's from_scratch exercise, stopping at the first gap
 #   steps     the walkthrough, against the reference implementation
@@ -39,6 +39,7 @@ case "$STEM" in
     simple_grpo) MODULE=SimpleGRPO ;;
     simple_dpo) MODULE=SimpleDPO ;;
     dpo)     MODULE=DPO ;;
+    gzero)   MODULE=GZero ;;
     *)      echo "unknown module: $STEM" >&2; exit 1 ;;
 esac
 
