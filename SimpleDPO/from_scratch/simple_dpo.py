@@ -9,19 +9,19 @@ How to work through it:
 Where this sits. SimpleGRPO dropped PPO's critic. DPO (Direct Preference
 Optimization, https://arxiv.org/abs/2305.18290) drops the rest of RL: no
 reward, no advantage, no rollouts while training, no ratio to theta_old, no
-clip. It trains on pairs a rater has already judged -- this attempt beat that
-one -- with a loss that is a logistic regression on each pair:
+clip. It trains on pairs that are already labelled -- this attempt is better
+than that one -- with a loss that is a logistic regression on each pair:
 
     stage 1  sequence_logp       log pi(attempt): its three turns' log-probs, summed
     stage 2  dpo_loss            -log sigmoid(beta * logits), DPO eq. 7
              implicit_reward     beta * log(pi / pi_ref): the reward the policy believes in
     stage 3  the loop            epochs of minibatches of pairs, on your dpo_loss
-    stage 4  no code             your DPO on the toy, and the reward it recovers
+    stage 4  no code             your DPO on the toy
 
 Nothing is imported from your earlier exercises: DPO keeps none of PPO's loss.
 
-The toy is SimplePPO's agent, two attempts per question, judged by a rater:
-see ../pair_env.py. Try not to open ../simple_dpo.py (the reference).
+The toy is SimplePPO's agent, two attempts per question, labelled by which one
+is better: see ../pair_env.py. Try not to open ../simple_dpo.py (the reference).
 """
 
 import sys
@@ -70,16 +70,18 @@ def dpo_loss(policy_chosen_logps, policy_rejected_logps, reference_chosen_logps,
              beta=0.1):
     """DPO's loss, averaged over the pairs. verl's compute_online_dpo_loss, loss_type="sigmoid".
 
-    The rater is Bradley-Terry: p(chosen over rejected) = sigmoid(r(chosen) - r(rejected)).
-    The best policy under a KL to pi_ref is pi*(y) = pi_ref(y) exp(r(y) / beta) / Z,
-    so r(y) = beta * log(pi*(y) / pi_ref(y)) + beta * log Z, and Z cancels in the
-    difference. Put the policy in place of pi* and maximise the likelihood of the
-    rater's verdicts:
+    The idea: make the chosen attempt more likely and the rejected one less
+    likely -- measured against pi_ref, so the policy is judged by how far it has
+    MOVED from where it started:
 
         pi_logratios  = log pi(chosen)     - log pi(rejected)       how much the policy prefers chosen
         ref_logratios = log pi_ref(chosen) - log pi_ref(rejected)   how much pi_ref did
-        logits        = pi_logratios - ref_logratios                the difference: > 0 is progress
+        logits        = pi_logratios - ref_logratios                > 0: the policy moved toward chosen
         loss          = mean over pairs of -log sigmoid(beta * logits)
+
+    -log sigmoid(x) is the loss of a yes/no classifier whose answer should be
+    "yes, chosen is better": large when x < 0, near 0 when x is large. (Why
+    this exact form: the walkthrough, step 4.)
 
     Use F.logsigmoid, not torch.log(torch.sigmoid(...)): when the policy gets a
     pair badly wrong, sigmoid underflows to 0 and its log is -inf. The names are
@@ -104,16 +106,16 @@ def dpo_loss(policy_chosen_logps, policy_rejected_logps, reference_chosen_logps,
 
 
 def implicit_reward(policy_logps, reference_logps, beta=0.1):
-    """The reward the policy implies for each attempt: beta * log(pi(attempt) / pi_ref(attempt)).
+    """How much more likely the policy has made an attempt than pi_ref did: beta * log(pi(attempt) / pi_ref(attempt)).
 
-    DPO's loss is the Bradley-Terry likelihood with this in place of a reward
-    model -- so training the policy trains this reward ("your language model is
-    secretly a reward model"). It is defined up to a constant per question, so
-    only differences mean anything. verl logs it as rewards_chosen / rewards_rejected.
+    DPO's loss pushes it up for chosen attempts and down for rejected ones, so
+    after training it ranks the attempts the way the labels did: the policy has
+    become a scorer of attempts. Only differences between attempts at the same
+    question mean anything. verl logs it as rewards_chosen / rewards_rejected.
 
     Shapes: (M,) and (M,) -> (M,).
 
-    Worked example, pi*_0.1 on attempt A: 0.1 * (-1.177 - (-2.343)) = 0.117
+    Worked example: log pi = -1.177, log pi_ref = -2.343, beta 0.1: 0.1 * 1.166 = 0.117
     """
     return ...                      # TODO stage 2: beta times the log-ratio to pi_ref
 
@@ -201,12 +203,12 @@ if __name__ == "__main__":
     _show("stage 1  log pi_ref of A and B", lambda: sequence_logp(Policy(), *pair), [-2.343, -1.532])
     _show("stage 2  dpo_loss at pi = pi_ref", lambda: loss_at(0.4), 0.693)
     _show("stage 2  dpo_loss at p(search) 0.6", lambda: loss_at(0.6), 0.615)
-    _show("stage 2  implicit reward, A under pi*",
+    _show("stage 2  implicit_reward, example",
           lambda: implicit_reward(torch.tensor([-1.177]), torch.tensor([-2.343]), 0.1), 0.117)
 
     def ten_iterations():
         import pair_env
         curve, _ = pair_env.train(sys.modules[__name__], seed=0, iterations=10)
         return f"J 0.388 -> {curve[-1]:.3f}"
-    _show("stage 3  10 iterations of DPO", ten_iterations, "J 0.388 -> 0.615")
+    _show("stage 3  10 iterations of DPO", ten_iterations, "J 0.388 -> 0.871")
     print("\nWhen these match, run:  ./scripts/run_simple_dpo.sh check")

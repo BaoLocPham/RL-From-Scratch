@@ -48,52 +48,41 @@ def policy_at(p_search):
     return policy
 
 
-def kl_to_ref(policy):
-    """KL(pi || pi_ref) over whole attempts, exactly, averaged over the two question types."""
-    total, reference = 0.0, env.Policy()
-    for qtype in (env.HARD, env.EASY):
-        states, actions, _ = env.all_attempts(qtype)
-        logp = sequence_logp(policy, states, actions).detach()
-        ref = sequence_logp(reference, states, actions).detach()
-        seen = logp > -float("inf")                    # 0 * log 0 = 0: attempts pi never makes add nothing
-        total += 0.5 * float((logp[seen].exp() * (logp[seen] - ref[seen])).sum())
-    return total
-
-
 Q = env.QUALITY
 
 # ---------------------------------------------------------------- step 1
-banner("STEP 1  no reward: a rater says which of two attempts is better")
+banner("STEP 1  no reward: every pair is labelled, the better attempt is chosen")
 print("""  SimpleGRPO graded every attempt right (+1) or wrong (-1). DPO never sees a number.
-  Each question is attempted twice, and a rater says which attempt is better. The DPO
-  paper models the rater as Bradley-Terry (eq. 1): each attempt has a quality r, and
+  It trains on LABELLED PAIRS: two attempts at one question, and a label saying which
+  one is better. On an LLM, people (or a judge model) write those labels before
+  training. The toy has no people, so pair_env.py writes them with the simplest rule:
 
-      p(A preferred over B) = sigmoid(r(A) - r(B))
+      the attempt with the higher average total is CHOSEN, the other is REJECTED;
+      two equally good attempts say nothing, so that pair is skipped.
 
-  Here r is the attempt's average total reward, set by the question and the searches k:
+  An attempt's average total depends only on its question type and its searches k:
 """)
-print(f"  {'':<5} {'k searches':>10} | {'r(q, k)':>7}")
+print(f"  {'':<5} {'k searches':>10} | {'average total':>13}")
 for qtype, name in ((env.HARD, "HARD"), (env.EASY, "EASY")):
     for k in range(env.TURNS + 1):
         best = "   <- best" if (qtype, k) in ((env.HARD, 2), (env.EASY, 0)) else ""
-        print(f"  {name if k == 0 else '':<5} {k:>10} | {float(Q[qtype, k]):>7.2f}{best}")
-print("\n  Some verdicts, and how often the rater gives them:")
-for label, a, b in (("HARD: two searches over none ", Q[0, 2], Q[0, 0]),
-                    ("HARD: two searches over one  ", Q[0, 2], Q[0, 1]),
-                    ("HARD: two searches over three", Q[0, 2], Q[0, 3]),
-                    ("EASY: none over one          ", Q[1, 0], Q[1, 1])):
-    print(f"    {label}  sigmoid({f(a)} - ({f(b)})) = sigmoid({f(a - b)}) = {sigmoid(float(a - b)):.3f}")
-print("""  The rater is noisy, like a person: two searches beat none on HARD only 86% of the
-  time, and beat three (0.8 vs 0.7) only 52% of the time. The pairs are all DPO gets.""")
+        print(f"  {name if k == 0 else '':<5} {k:>10} | {float(Q[qtype, k]):>13.2f}{best}")
+print("\n  Some labels:")
+for label, a, b, verdict in (("HARD: two searches vs none ", Q[0, 2], Q[0, 0], "chosen = two searches"),
+                             ("HARD: two searches vs three", Q[0, 2], Q[0, 3], "chosen = two searches"),
+                             ("HARD: two searches vs two  ", Q[0, 2], Q[0, 2], "equally good: skipped"),
+                             ("EASY: none vs one          ", Q[1, 0], Q[1, 1], "chosen = none")):
+    print(f"    {label}  {f(a)} vs {f(b)}   ->  {verdict}")
+print("""  The labels are all DPO gets. The averages themselves never reach training.""")
 
 # ---------------------------------------------------------------- step 2
 banner("STEP 2  one pair: two attempts at one HARD question")
 states, actions, searches = env.all_attempts(env.HARD)
 A, B = 6, 0                                            # (search, search, skip) and (skip, skip, skip)
-print(f"""  attempt A: actions {actions[A].tolist()} (1 = SEARCH), states {states[A].tolist()}, {int(searches[A])} searches, r = {f(Q[0, 2])}
-  attempt B: actions {actions[B].tolist()},                  states {states[B].tolist()}, {int(searches[B])} searches, r = {f(Q[0, 0])}
+print(f"""  attempt A: actions {actions[A].tolist()} (1 = SEARCH), states {states[A].tolist()}, {int(searches[A])} searches, average total {f(Q[0, 2])}
+  attempt B: actions {actions[B].tolist()},                  states {states[B].tolist()}, {int(searches[B])} searches, average total {f(Q[0, 0])}
 
-  The rater prefers A with probability sigmoid(1.8) = {sigmoid(1.8):.3f}. Say it does:
+  {f(Q[0, 2])} > {f(Q[0, 0])}, so the label is:
       chosen = A, rejected = B
   A pair is (chosen, rejected). Which is which is the whole label.
   (The states are env.state_id(question type, turn, searches so far), as in SimplePPO.)""")
@@ -132,13 +121,18 @@ print("""  RLHF (and SimpleGRPO with its KL) maximises reward while staying near
 
   Solve that for r:   r(y) = beta * log(pi*(y) / pi_ref(y)) + beta * log Z
 
-  and put it into Bradley-Terry. Z is the same for both attempts at one question, so it
-  cancels:
+  DPO's paper assumes the labels come from a judge who prefers the better attempt
+  more often the bigger the gap (the Bradley-Terry model):
+
+      p(A labelled better than B) = sigmoid(r(A) - r(B))
+
+  Put r into that. Z is the same for both attempts at one question, so it cancels:
 
       p(A over B) = sigmoid(beta * log(pi*(A) / pi_ref(A)) - beta * log(pi*(B) / pi_ref(B)))
 
   No reward and no Z left: only the policy and pi_ref. So fit the POLICY to the
-  preferences directly, by maximum likelihood. That is DPO.
+  labels directly, by maximum likelihood. That is DPO. (Our labeller always picks the
+  better attempt: the most confident judge there is.)
 """)
 beta = 0.1
 star = env.optimal_policy(beta)
@@ -150,13 +144,13 @@ print(f"  Check it on the toy. pi*_0.1, enumerated over all 8 attempts (env.opti
 print(f"    log pi*(A) = {f(star_a[0])}   beta * log(pi*(A) / pi_ref(A)) = 0.1 * ({f(star_a[0])} - ({f(ref_chosen[0])})) = {f(reward_a[0])}")
 print(f"    log pi*(B) = {f(star_b[0])}  beta * log(pi*(B) / pi_ref(B)) = 0.1 * ({f(star_b[0])} - ({f(ref_rejected[0])})) = {f(reward_b[0])}")
 print(f"    difference {f(reward_a[0] - reward_b[0])}  =  r(A) - r(B) = 0.8 - (-1.0) = 1.8")
-print("""  Each implicit reward is r plus the same unknown constant (beta * log Z); their
-  difference is exactly the reward difference. That is the paper's title: the policy's
-  log-probs, measured against pi_ref, ARE a reward model.""")
+print("""  Each one is r plus the same unknown constant (beta * log Z), so their difference is
+  exactly the reward difference. That is the paper's title: the policy's log-probs,
+  measured against pi_ref, can stand in for a reward model.""")
 
 # ---------------------------------------------------------------- step 5
 banner("STEP 5  dpo_loss: logistic regression on the pair")
-print("""  With the policy in the place of pi*, the likelihood of the rater's verdict is
+print("""  With the policy in the place of pi*, the chance it gives the label is
   sigmoid(beta * logits), and the loss is its negative log (DPO eq. 7):
 
       pi_logratios  = log pi(chosen)     - log pi(rejected)
@@ -190,7 +184,7 @@ print("""  Differentiate the loss (DPO §4, "What does the DPO update do?"):
   a policy gradient on two attempts, with +w on the chosen and -w on the rejected, where
 
       w = beta * sigmoid(-beta * logits)      large while the policy still gets the pair wrong,
-                                              shrinking to 0 as it agrees with the rater
+                                              shrinking to 0 as it agrees with the label
 """)
 policy = env.Policy()
 pc = sequence_logp(policy, chosen_states, chosen_actions)
@@ -212,26 +206,26 @@ print("""  Descent subtracts these: SEARCH goes up where A searched and B skippe
   factor is why the demo's SGD uses lr 0.3 / beta = 3.0 where SimpleGRPO used 0.3.""")
 
 # ---------------------------------------------------------------- step 7
-banner("STEP 7  beta: how far from pi_ref the best policy goes")
-print("""  The loss's minimum is pi*_beta = pi_ref * exp(r / beta) / Z (step 4). beta sets how
-  much reward is worth a unit of KL. Exactly, on the toy:
+banner("STEP 7  beta: how hard to push, and when to stop")
+print("""  beta multiplies the logits inside the loss, so it sets how much the policy must move
+  before a pair counts as settled. The push on a pair is w = beta * sigmoid(-beta * logits):
 """)
-print(f"  {'beta':>6} | {'J(pi*_beta)':>11} | {'KL to pi_ref':>12} | {'HARD: p(2 searches)':>19} | {'EASY: p(0 searches)':>19}")
-for b in (1.0, 0.5, 0.2, 0.1, 0.05, 0.02):
-    target = env.optimal_policy(b)
-    hard = sequence_logp(target, *env.all_attempts(env.HARD)[:2]).detach().exp()
-    easy = sequence_logp(target, *env.all_attempts(env.EASY)[:2]).detach().exp()
-    print(f"  {b:>6} | {env.true_reward(target):>11.3f} | {kl_to_ref(target):>12.3f} | "
-          f"{float(hard[env.all_attempts(env.HARD)[2] == 2].sum()):>19.3f} | "
-          f"{float(easy[env.all_attempts(env.EASY)[2] == 0].sum()):>19.3f}")
-print(f"""  pi_ref itself: J {env.true_reward(env.Policy()):.3f}. A small beta trusts the preferences and goes far; a large one
-  stays near pi_ref. On an LLM, pi_ref is the model before training, and staying near it
-  keeps what it already knew.""")
+print(f"  {'logits':>8} | {'w at beta 0.1':>13} | {'w at beta 0.5':>13}")
+for logits in (0, 5, 10, 20, 40):
+    print(f"  {logits:>8} | {0.1 * sigmoid(-0.1 * logits):>13.4f} | {0.5 * sigmoid(-0.5 * logits):>13.4f}")
+print("""  The push fades as the policy moves toward the chosen attempt: faster with a bigger
+  beta, which keeps the policy closer to pi_ref. On an LLM, pi_ref is the model before
+  training, and staying near it keeps what it already knew.
+
+  The push never reaches exactly 0. Our labels never disagree (the better attempt always
+  wins), so nothing ever pushes back, and the policy keeps moving, slowly, toward always
+  choosing the better attempt. With real labellers, who sometimes disagree, the pairs
+  that go the other way hold it back. (IPO, in DPO/, is a loss that stops on its own.)""")
 
 # ---------------------------------------------------------------- step 8
-banner("STEP 8  the loop: 60 iterations of 8 pairs, sampled from pi_ref before training")
+banner("STEP 8  the loop: 60 iterations, pairs sampled from pi_ref and labelled before training")
 print("""  for iteration:
-      pairs = the next 8 (chosen, rejected) pairs            the published DPO: all from pi_ref
+      pairs = the next batch of labelled pairs               the published DPO: all from pi_ref
       for epoch in range(10):
           for minibatch of 4 pairs:
               loss = dpo_loss(...)                           steps 3 and 5
@@ -239,23 +233,19 @@ print("""  for iteration:
 """)
 curve, policy = env.train(impl, seed=0)
 print(f"  seed 0: J {curve[0]:.3f} after 1 iteration -> {curve[9]:.3f} after 10 -> {curve[-1]:.3f} after 60."
-      f"   target J(pi*_0.1) {env.true_reward(star):.3f}")
-print("\n  learned p(search), with pi*_0.1's in brackets:")
-learned_p = policy.logits.softmax(-1)[:, env.SEARCH].detach()
-star_p = star.logits.softmax(-1)[:, env.SEARCH].detach()
-for qtype, name in ((env.HARD, "HARD"), (env.EASY, "EASY")):
-    for turn in range(env.TURNS):
-        ids = [env.state_id(qtype, turn, count) for count in range(turn + 1)]
-        cells = [f"{count} so far: {float(learned_p[i]):.2f} ({float(star_p[i]):.2f})" for count, i in enumerate(ids)]
-        print(f"    {name} turn {turn}:  " + "   ".join(cells))
-print("""  Some states are rarely reached (EASY after a search), so their numbers barely matter to J.
-  The one that does: HARD, turn 2, two searches so far. pi* stops there; this seed often
-  searches a third time, because the rater prefers two searches to three only 52% of the
-  time, and 480 verdicts that close do not settle it.""")
+      f"   best possible {env.BEST_J}")
+print("\n  learned p(search):")
+for row_text in env.describe(policy):
+    print("  " + row_text)
+print("""  HARD should search twice then stop; EASY should never search. Some states are rarely
+  reached (EASY after a search), so their numbers barely matter.""")
 learned = env.implicit_rewards(impl, policy, beta)
-print("\n  the reward it learned, beta * log(pi / pi_ref), relative to 0 searches, against the rater's r:")
+print("\n  how the policy now scores each number of searches, beta * log(pi / pi_ref), relative to 0:")
 for qtype, name in ((env.HARD, "HARD"), (env.EASY, "EASY")):
-    print(f"    {name}  learned {row(learned[qtype])}   r {row(Q[qtype] - Q[qtype, 0])}")
-print("""  One seed of noisy verdicts: close, not exact (the demo averages 20). Trained only on
-  which attempt won, the policy has learned both what to do and roughly how good each
-  choice is.""")
+    order = sorted(range(env.TURNS + 1), key=lambda k: -float(learned[qtype, k]))
+    best_first = sorted(range(env.TURNS + 1), key=lambda k: -float(Q[qtype, k]))
+    print(f"    {name}  learned {row(learned[qtype])}   best to worst: {order}"
+          f"   (by average total: {best_first})")
+print("""  Trained only on which attempt was better, the policy now ranks the attempts in the same
+  order as their average totals: it has become a scorer of attempts. The numbers are larger
+  than the averages and keep growing with training, because the labels never disagree.""")

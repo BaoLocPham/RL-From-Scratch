@@ -151,7 +151,7 @@ So `GRPO/`'s exercise is this stage 1 at verl's shapes. It adds no new
 algorithm, only the bookkeeping.
 
 Next on the toy track, `SimpleDPO/` takes away the reward too: the same agent,
-two attempts per question, and only a rater's verdict on which was better.
+two attempts per question, and only a label saying which one was better.
 
 ## Terms
 

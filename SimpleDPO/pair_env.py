@@ -1,4 +1,4 @@
-"""SimpleGRPO's toy, two attempts per question, and a rater who says which one is better. Given code.
+"""SimpleGRPO's toy, two attempts per question, labelled: which attempt is better. Given code.
 
 The agent is SimplePPO's, unchanged: three turns of SEARCH (costs 0.1) or SKIP,
 then it answers; the same 12 states, the same 12 x 2 table of logits (see
@@ -10,27 +10,26 @@ SimplePPO/env.py). What changes is what training gets to see.
        episodes 0, 1    question 0
        episodes 2, 3    question 1        ...
 
-2. A preference, not a reward. DPO never sees a number. A rater looks at the
-   two attempts and says which one is better, and that is all. The rater is
-   the DPO paper's model of a human (Bradley-Terry, eq. 1):
+2. A label, not a reward. DPO never sees a number. Real DPO trains on a
+   dataset that people (or a judge model) have already labelled: for each
+   prompt, which of two answers is better. The toy has no people, so this
+   file makes the labels itself, with the simplest possible labeller:
 
-       p(attempt 1 preferred over attempt 2) = sigmoid(r(attempt 1) - r(attempt 2))
+       the attempt with the higher average total is chosen, the other rejected;
+       two equally good attempts (same question type, same number of searches)
+       say nothing, and the pair is skipped.
 
-   where r is the attempt's quality: the average total reward of its number of
-   searches, SimplePPO's answer quality minus 0.1 per search:
+   The average total of an attempt depends only on its question type and its
+   number of searches (SimplePPO's answer quality minus 0.1 per search):
 
                   0 searches  1 search  2 searches  3 searches
        HARD          -1.0       -0.1       0.8         0.7
        EASY           1.0        0.8       0.6         0.4
 
-   The rater judges the answer, not the luck: on a HARD question one search is
-   a coin flip, and the rater knows it. The verdicts are still noisy: on HARD,
-   two searches beat none only 86% of the time (sigmoid(1.8)), and two beat
-   three only 52% of the time (sigmoid(0.1)).
-
-   `labels="outcome"` ranks the two by the rewards they actually got instead
-   (+1 right, -1 wrong, -0.1 per search, as in SimpleGRPO), and drops ties: the
-   way verl's online-DPO recipe ranks responses with a checker.
+   `labels="outcome"` labels the two by the rewards they actually got instead
+   (+1 right, -1 wrong, -0.1 per search, as in SimpleGRPO), and skips ties: the
+   way verl's online-DPO recipe labels responses with a checker. That is a
+   noisier label: one lucky search can beat two searches.
 
 The reference policy pi_ref is the starting policy, frozen, as in SimpleGRPO.
 DPO's pi_ref is also where its data comes from, if it is offline: the
@@ -47,16 +46,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "SimpleGRPO"))
 from group_env import (ANSWER_QUALITY, BEST_J, EASY, HARD, SEARCH, SEARCH_COST, SKIP, TURNS,  # noqa: E402,F401
                        Policy, describe, rollout, state_id, true_reward)
 
-# QUALITY[question type][searches]: the average total reward of an attempt. The rater's r, and J's.
+# QUALITY[question type][searches]: the average total reward of an attempt. What the labeller compares, and J's.
 QUALITY = ANSWER_QUALITY - SEARCH_COST * torch.arange(TURNS + 1)
 
 
 @torch.no_grad()
-def collect_pairs(policy, ref_policy, questions, sequence_logp, labels="rater"):
+def collect_pairs(policy, ref_policy, questions, sequence_logp, labels="better"):
     """`questions` questions, each attempted twice by `policy`, turned into (chosen, rejected) pairs.
 
-    Every tensor has one row per pair. With the rater there is one pair per
-    question; with labels="outcome", tied pairs are dropped.
+    Every tensor has one row per pair: one per question whose two attempts are
+    not equally good (tied pairs are skipped).
 
     chosen_states, chosen_actions         (pairs, 3)  the preferred attempt, turn by turn
     rejected_states, rejected_actions     (pairs, 3)  the other one
@@ -70,16 +69,14 @@ def collect_pairs(policy, ref_policy, questions, sequence_logp, labels="rater"):
     """
     batch = rollout(policy, ref_policy, questions, 2)          # episodes 2i and 2i + 1: question i
     firsts = torch.arange(questions) * 2
-    if labels == "rater":
-        quality = QUALITY[batch["qtype"], batch["searches"]].view(-1, 2)          # (questions, 2)
-        first_wins = torch.rand(questions) < torch.sigmoid(quality[:, 0] - quality[:, 1])
-        keep = torch.ones(questions, dtype=torch.bool)
+    if labels == "better":
+        scores = QUALITY[batch["qtype"], batch["searches"]].view(-1, 2)          # average totals, (questions, 2)
     elif labels == "outcome":
-        scores = batch["rewards"].sum(1).view(-1, 2)                             # (questions, 2)
-        first_wins = scores[:, 0] > scores[:, 1]
-        keep = (scores[:, 0] - scores[:, 1]).abs() > 1e-6                        # a tie says nothing
+        scores = batch["rewards"].sum(1).view(-1, 2)                             # totals actually got, (questions, 2)
     else:
         raise ValueError(f"unknown labels: {labels}")
+    first_wins = scores[:, 0] > scores[:, 1]                                     # is the first attempt better?
+    keep = (scores[:, 0] - scores[:, 1]).abs() > 1e-6                            # a tie says nothing: skip it
     chosen = (firsts + (~first_wins).long())[keep]
     rejected = (firsts + first_wins.long())[keep]
 
@@ -96,11 +93,11 @@ def collect_pairs(policy, ref_policy, questions, sequence_logp, labels="rater"):
     return pairs
 
 
-def train(impl, seed, iterations=60, questions=8, lr=3.0, online=False, labels="rater", **update):
-    """DPO's loop: 8 pairs -> dpo_update (K epochs of minibatches), `iterations` times.
+def train(impl, seed, iterations=60, questions=8, lr=3.0, online=False, labels="better", **update):
+    """DPO's loop: up to 8 pairs -> dpo_update (K epochs of minibatches), `iterations` times.
 
-    online=False is the published DPO: every pair is sampled up front, from
-    pi_ref, and iteration i trains on the i-th 8 of them. online=True samples
+    online=False is the published DPO: every pair is sampled and labelled up
+    front, from pi_ref, and iteration i trains on the i-th batch of them. online=True samples
     each iteration's pairs from the policy as it is now, as verl's online-DPO
     recipe does. Either way, 16 attempts per iteration, SimpleGRPO's budget.
 
@@ -128,7 +125,7 @@ def train(impl, seed, iterations=60, questions=8, lr=3.0, online=False, labels="
 
 
 # ------------------------------------------------------------ the exact answers
-# What DPO is aiming at, computed by enumerating all 8 attempts at each question type.
+# Computed by enumerating all 8 attempts at each question type.
 
 def all_attempts(qtype):
     """Every action sequence for one question type, as (states, actions, searches): (8, 3), (8, 3), (8,)."""
@@ -145,7 +142,9 @@ def all_attempts(qtype):
 
 
 def optimal_policy(beta):
-    """pi*_beta, the policy DPO's loss is minimised by: pi_ref(attempt) * exp(r / beta), normalised.
+    """pi*_beta = pi_ref(attempt) * exp(r / beta), normalised: the best policy under a KL to pi_ref (DPO eq. 4).
+
+    DPO's loss is derived from it (walkthrough, step 4), with r the average total.
 
     It is exactly representable by the 12 x 2 table: its p(search) in each state
     is the weight of the attempts that search there over the weight of all the
@@ -173,7 +172,8 @@ def implicit_rewards(impl, policy, beta):
 
     Averaged over the attempts with the same number of searches, then shifted
     so that 0 searches is 0: a reward is only ever defined up to a constant per
-    question. Returns a (2, 4) tensor to compare with QUALITY - QUALITY[:, :1].
+    question. Returns a (2, 4) tensor. Trained on this file's labels, its ORDER
+    matches QUALITY's; its size keeps growing, because the labels never disagree.
     """
     reference = Policy()
     out = torch.zeros(2, TURNS + 1)

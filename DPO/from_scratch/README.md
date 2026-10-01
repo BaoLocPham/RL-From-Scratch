@@ -86,6 +86,6 @@ equal-length responses, where the two agree.
   `compute_onlinedpo_pref` to drop ties, and what would the batch size become?
 - The recipe's `rewards_accuracies` is 0 or 1 per batch. How does it differ from
   the fraction of pairs ranked correctly?
-- DPO was derived for pairs judged by a Bradley–Terry rater. The recipe ranks
-  by a verifiable reward instead. `SimpleDPO/` shows one way that can fail.
-  Which one, and what does GRPO keep that a preference throws away?
+- The recipe labels each pair by a verifiable reward: whichever response
+  scored more. `SimpleDPO/` shows one way that can fail when the reward is
+  noisy. Which one, and what does GRPO keep that a label throws away?
