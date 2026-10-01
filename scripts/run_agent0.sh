@@ -19,15 +19,6 @@
 # PPO's Part 1 (core PPO) only, and `steps core`, `scratch core`, `diff core` stop there too.
 #   all       check, steps, run
 #
-# Agent0 only, since it alone trains two agents with two algorithms:
-#
-#   overview    the iteration flow diagram, and the glossary of terms
-#   trace       ONE question followed through Step 3 and Step 4, narrated
-#   curriculum  the proposer's half -- writes questions, plain GRPO
-#   executor    the solver's half   -- answers them, ADPO
-#
-# For Agent0, 'steps' runs both of those in dependency order.
-#
 # With no command, prints this list.
 
 set -euo pipefail
@@ -95,33 +86,6 @@ cmd_scratch() {
     RL_IMPL=scratch "$PYTHON" "$MODULE/steps_$STEM.py" "$@"
 }
 
-cmd_half() {
-    if [ "$MODULE" != "Agent0" ]; then
-        echo "'$1' is Agent0 only; $MODULE has a single agent" >&2
-        return 1
-    fi
-    banner "Agent0: the $1 half"
-    "$PYTHON" "Agent0/steps_$1.py"
-}
-
-cmd_overview() {
-    if [ "$MODULE" != "Agent0" ]; then
-        echo "'overview' is Agent0 only" >&2
-        return 1
-    fi
-    banner "Agent0: the iteration flow, and the terms"
-    "$PYTHON" "Agent0/overview.py"
-}
-
-cmd_trace() {
-    if [ "$MODULE" != "Agent0" ]; then
-        echo "'trace' is Agent0 only" >&2
-        return 1
-    fi
-    banner "Agent0: one question through Step 3 and Step 4"
-    "$PYTHON" "Agent0/trace_one_question.py"
-}
-
 cmd_run() {
     banner "$MODULE demo"
     "$PYTHON" "$MODULE/run_$STEM.py" "$@"
@@ -158,11 +122,7 @@ case "$COMMAND" in
     check)   cmd_check "$@"   ;;
     steps)   cmd_steps "$@"   ;;
     scratch) cmd_scratch "$@" ;;
-    run)        cmd_run "$@" ;;
-    curriculum) cmd_half curriculum ;;
-    executor)   cmd_half executor ;;
-    overview)   cmd_overview ;;
-    trace)      cmd_trace ;;
+    run)     cmd_run "$@"     ;;
     diff)    cmd_diff "$@"    ;;
     all)     cmd_all     ;;
     ""|-h|--help|help) usage ;;

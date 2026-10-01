@@ -1,22 +1,4 @@
-"""Agent0 from scratch: the paper's equations on the toy. Fill the TODOs, then run ``check.py``.
-
-How to work through it:
-  1. Fill the lines marked TODO stage 1 (each TODO is one term of one equation).
-  2. Try it:    python Agent0/from_scratch/agent0.py    prints your results next to the expected ones
-  3. Check it:  ./scripts/run_agent0.sh check            stops at the first stage that is not right yet
-  4. Move on to the next stage.
-
-    stage 1  self_consistency                                   p^ and y~            (Eq. 6)
-    stage 2  uncertainty_reward, tool_reward,                   the Curriculum Agent's
-             repetition_penalty, curriculum_reward              reward R_C           (Eq. 2-5)
-    stage 3  keep, executor_reward                              the dataset, and the Executor's reward (Eq. 7)
-    stage 4  group_advantage, adpo_scale, adpo_eps_high,        GRPO's advantage, and ADPO's two changes
-             clipped_loss                                       (Eq. 8)
-    stage 5  no code                                            the loop runs on your pieces
-
-The loops (score_questions, train_curriculum, curate, train_executor, agent0)
-are given: read them, they are the algorithm. Try not to open ../agent0.py
-(the reference).
+"""Agent0, the paper's equations on the toy. Demo: ``python Agent0/run_agent0.py``.
 
 Agent0 (https://arxiv.org/abs/2511.16043) has no training data. Two agents
 make it for each other, in a loop the paper runs T = 3 times:
@@ -36,14 +18,11 @@ Executor's k answers to it, p^ (p_hat) is how often they agree, y~ (y_tilde)
 is their majority. The toy -- the questions and both agents -- is in agent0_env.py.
 """
 
-import sys
-from collections import Counter  # noqa: F401  (stage 1)
-from pathlib import Path
+from collections import Counter
 
 import torch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from agent0_env import MALFORMED, Curriculum, Executor, level, tool_calls  # noqa: E402
+from agent0_env import MALFORMED, Curriculum, Executor, level, tool_calls
 
 # ================================================================ the reward pieces
 
@@ -56,9 +35,9 @@ def self_consistency(answers):
     answers: (k,) the Executor's k answers to one question x.
     Returns (y_tilde, p_hat): the majority answer, and the fraction of the k that gave it.
     """
-    votes = ...                                     # TODO stage 1: sum_i 1(o_i = y), for every answer y given
-    y_tilde, count = ...                            # TODO stage 1: y~ = argmax_y; ties go to the answer seen first
-    p_hat = ...                                     # TODO stage 1: p^ = (1/k) * sum_i 1(o_i = y~): divide by ALL k
+    votes = Counter(answers.tolist())               # sum_i 1(o_i = y), for every answer y given
+    y_tilde, count = votes.most_common(1)[0]        # y~ = argmax_y; ties go to the answer seen first
+    p_hat = count / len(answers)                    # p^ = (1/k) * sum_i 1(o_i = y~): divide by ALL k
     return y_tilde, p_hat
 
 
@@ -70,7 +49,7 @@ def uncertainty_reward(p_hat):
     1 when p^ = 0.5 (it agrees with itself half the time: the question is at its
     frontier), 0 when p^ = 0 or 1 (always the same answer: too easy).
     """
-    return ...                                      # TODO stage 2: R_unc: a tent, peak 1 at p^ = 0.5
+    return 1.0 - 2.0 * abs(p_hat - 0.5)             # R_unc: a tent, peak 1 at p^ = 0.5
 
 
 def tool_reward(n_tool, gamma=0.05, cap=4):
@@ -81,7 +60,7 @@ def tool_reward(n_tool, gamma=0.05, cap=4):
     The cap C stops a question earning more just by forcing endless tool calls.
     The paper sets C = 4 but leaves gamma open; gamma = 0.05 is our choice.
     """
-    return ...                                      # TODO stage 2: R_tool: gamma per tool call, at most C calls
+    return gamma * min(n_tool, cap)                 # R_tool: gamma per tool call, at most C calls
 
 
 def repetition_penalty(questions, lambda_rep=1.0):
@@ -95,8 +74,8 @@ def repetition_penalty(questions, lambda_rep=1.0):
 
     questions: (B,) the batch of question ids. Returns (B,): each one's penalty.
     """
-    cluster_size = ...                              # TODO stage 2: |C_k|: copies of x_i in the batch, (B,)
-    return ...                                      # TODO stage 2: R_rep = lambda_rep * |C_k| / B
+    cluster_size = torch.bincount(questions)[questions]          # |C_k|: copies of x_i in the batch, (B,)
+    return lambda_rep * cluster_size.float() / len(questions)    # R_rep = lambda_rep * |C_k| / B
 
 
 def curriculum_reward(well_formed, r_unc, r_tool, r_rep, lambda_unc=1.0, lambda_tool=0.6):
@@ -109,8 +88,8 @@ def curriculum_reward(well_formed, r_unc, r_tool, r_rep, lambda_unc=1.0, lambda_
     max(0, .) keeps every reward non-negative. lambda_tool = 0.6 is the paper's;
     it leaves lambda_unc open, and 1.0 is our choice.
     """
-    inner = ...                                     # TODO stage 2: lambda_unc R_unc + lambda_tool R_tool - R_rep
-    return ...                                      # TODO stage 2: R_format * max(0, inner)
+    inner = lambda_unc * r_unc + lambda_tool * r_tool - r_rep    # lambda_unc R_unc + lambda_tool R_tool - R_rep
+    return well_formed * torch.clamp(inner, min=0.0)             # R_format * max(0, inner)
 
 
 def keep(p_hat, low=0.3, high=0.8):
@@ -123,7 +102,7 @@ def keep(p_hat, low=0.3, high=0.8):
     Below 0.3 the majority is too unreliable to use as a label; above 0.8 the
     question is too easy to teach anything.
     """
-    return ...                                      # TODO stage 3: inside the band, edges included
+    return low <= p_hat <= high                     # inside the band, edges included
 
 
 def executor_reward(answers, y_tilde):
@@ -134,7 +113,7 @@ def executor_reward(answers, y_tilde):
     1 for agreeing with the majority label, 0 otherwise. Not the TRUE answer:
     nobody in Agent0 knows it. answers: (G,). Returns (G,) of 0.0 / 1.0.
     """
-    return ...                                      # TODO stage 3: R_i = 1(o_i = y~)
+    return (answers == y_tilde).float()             # R_i = 1(o_i = y~)
 
 
 # ================================================================ the update
@@ -148,9 +127,9 @@ def group_advantage(rewards, eps=1e-6):
     rewards: (groups, G), one row per group (the G answers to one question, or
     the G questions from one prompt). Returns (groups, G).
     """
-    mean = ...                                      # TODO stage 4: mean(R_group), one per row: (groups, 1)
-    std = ...                                       # TODO stage 4: std(R_group), sample std: (groups, 1)
-    return ...                                      # TODO stage 4: A^_i; a group that all agrees gets 0
+    mean = rewards.mean(dim=1, keepdim=True)        # mean(R_group), one per row: (groups, 1)
+    std = rewards.std(dim=1, keepdim=True)          # std(R_group), sample std: (groups, 1)
+    return (rewards - mean) / (std + eps)           # A^_i; a group that all agrees gets 0
 
 
 def adpo_scale(p_hat):
@@ -162,8 +141,8 @@ def adpo_scale(p_hat):
     shrunk. The paper only says f is increasing; we use a straight line over
     the kept band, from 0.5 at p^ = 0.3 up to 1.0 at p^ = 0.8.
     """
-    t = ...                                         # TODO stage 4: where p^ sits in [0.3, 0.8], as 0..1
-    return ...                                      # TODO stage 4: s(x): 0.5 for the hardest kept question, 1.0 for the easiest
+    t = min(max((p_hat - 0.3) / 0.5, 0.0), 1.0)     # where p^ sits in [0.3, 0.8], as 0..1
+    return 0.5 + 0.5 * t                            # s(x): 0.5 for the hardest kept question, 1.0 for the easiest
 
 
 def adpo_eps_high(p_hat):
@@ -173,8 +152,8 @@ def adpo_eps_high(p_hat):
     probability. The paper only says eps_high decreases with p^; we use a
     straight line from 0.3 at p^ = 0.3 down to the usual 0.2 at p^ = 0.8.
     """
-    t = ...                                         # TODO stage 4: how far below the band's top, as 0..1
-    return ...                                      # TODO stage 4: eps_high(x): 0.3 for the hardest kept question
+    t = min(max((0.8 - p_hat) / 0.5, 0.0), 1.0)     # how far below the band's top, as 0..1
+    return 0.2 + 0.1 * t                            # eps_high(x): 0.3 for the hardest kept question
 
 
 def clipped_loss(logp, old_logp, advantages, eps_high, eps_low=0.2):
@@ -187,9 +166,9 @@ def clipped_loss(logp, old_logp, advantages, eps_high, eps_low=0.2):
     eps_high = 0.2 for every sample. The Executor (ADPO): advantages times
     s(x), and eps_high(x) per sample. All inputs are (n,).
     """
-    ratio = ...                                     # TODO stage 4: r_i = pi / pi_old
-    clipped = ...                                   # TODO stage 4: clip(r_i, 1 - eps_low, 1 + eps_high)
-    return ...                                      # TODO stage 4: -(1/G) sum_i min(...)
+    ratio = torch.exp(logp - old_logp)                                    # r_i = pi / pi_old
+    clipped = torch.minimum(torch.clamp(ratio, min=1.0 - eps_low), 1.0 + eps_high)   # clip(r_i, 1 - eps_low, 1 + eps_high)
+    return -torch.min(ratio * advantages, clipped * advantages).mean()    # -(1/G) sum_i min(...)
 
 
 # ================================================================ the loop
@@ -308,47 +287,3 @@ def agent0(seed=0, iterations=3, adpo=True, lambda_rep=1.0, executor_lr=0.05, re
         if report:
             report(iteration, record)
     return curriculum, executor, history
-
-
-# ================================================================ playground
-def _show(label, fn, expected):
-    """Run one of your functions and print it next to the expected value."""
-    try:
-        got = fn()
-    except Exception as exc:                           # unfinished TODOs land here
-        got = f"not done yet ({type(exc).__name__})"
-    if got is Ellipsis or (isinstance(got, tuple) and Ellipsis in got):
-        got = "not done yet"
-    elif isinstance(got, torch.Tensor):
-        got = [round(x, 3) + 0.0 for x in got.detach().flatten().tolist()]
-        got = got[0] if len(got) == 1 else got
-    elif isinstance(got, float):
-        got = round(got, 3) + 0.0
-    print(f"  {label:<40} yours: {str(got):<30} expected: {expected}")
-
-
-if __name__ == "__main__":
-    torch.set_num_threads(1)
-    batch = torch.tensor([3, 3, 3, 0, 13, 7, 4, MALFORMED])
-    print("Your functions on worked examples (fill a stage, rerun, compare):\n")
-    _show("stage 1  self_consistency", lambda: self_consistency(torch.tensor([0, 0, 3, 0, 5, 3, 0, 1, 0, 2])), (0, 0.5))
-    _show("stage 2  uncertainty_reward(0.3)", lambda: uncertainty_reward(0.3), 0.6)
-    _show("stage 2  tool_reward(2), tool_reward(7)", lambda: (tool_reward(2), tool_reward(7)), (0.1, 0.2))
-    _show("stage 2  repetition_penalty", lambda: repetition_penalty(batch),
-          [0.375, 0.375, 0.375, 0.125, 0.125, 0.125, 0.125, 0.125])
-    _show("stage 2  curriculum_reward", lambda: curriculum_reward(
-        torch.tensor([1.0, 1.0, 0.0]), torch.tensor([0.8, 0.1, 1.0]), torch.tensor([0.1, 0.05, 0.1]),
-        torch.tensor([0.375, 0.5, 0.125])), [0.485, 0.0, 0.0])
-    _show("stage 3  keep(0.3), keep(0.81)", lambda: (keep(0.3), keep(0.81)), (True, False))
-    _show("stage 3  executor_reward", lambda: executor_reward(torch.tensor([0, 2, 2, 5]), 2), [0.0, 1.0, 1.0, 0.0])
-    _show("stage 4  group_advantage", lambda: group_advantage(torch.tensor([[1.0, 0.0, 0.0, 1.0]])),
-          [0.866, -0.866, -0.866, 0.866])
-    _show("stage 4  adpo_scale, adpo_eps_high (0.55)", lambda: (adpo_scale(0.55), adpo_eps_high(0.55)), (0.75, 0.25))
-    _show("stage 4  clipped_loss", lambda: clipped_loss(torch.tensor([-0.5, -2.0]), torch.tensor([-1.0, -1.0]),
-                                                        torch.tensor([1.0, -1.0]), torch.tensor([0.3, 0.2])), -0.25)
-
-    def one_iteration():
-        _, _, history = agent0(seed=0, iterations=1)
-        return f"skill 4.00 -> {history[0]['skill']:.2f}"
-    _show("stage 5  one iteration of the loop", one_iteration, "skill 4.00 -> 4.99")
-    print("\nWhen these match, run:  ./scripts/run_agent0.sh check")
