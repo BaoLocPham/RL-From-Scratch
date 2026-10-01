@@ -3,7 +3,7 @@
 SimpleGRPO dropped PPO's critic. DPO (Direct Preference Optimization,
 https://arxiv.org/abs/2305.18290) drops the rest of RL: no reward, no
 advantage, no rollouts while training, no ratio to theta_old, no clip. It
-trains on pairs a rater has already judged -- this attempt beat that one -- with
+trains on pairs that are already labelled -- this attempt is better than that one -- with
 a loss that is a logistic regression on the pair:
 
     for iteration:
@@ -23,7 +23,7 @@ Three pieces, and nothing else:
                       in -- "your language model is secretly a reward model"
 
 pi_ref is not a penalty added to the loss, as in SimpleGRPO: it sits inside
-the loss. The pairs and the rater are in pair_env.py.
+the loss. The pairs and their labels are made in pair_env.py.
 """
 
 import torch
@@ -57,10 +57,10 @@ def dpo_loss(policy_chosen_logps, policy_rejected_logps, reference_chosen_logps,
 
 
 def implicit_reward(policy_logps, reference_logps, beta=0.1):
-    """The reward the policy implies for each attempt: beta * log(pi(attempt) / pi_ref(attempt)).
+    """How much more likely the policy has made an attempt than pi_ref did: beta * log(pi(attempt) / pi_ref(attempt)).
 
-    DPO's loss is the Bradley-Terry likelihood with this in place of a reward
-    model, so training the policy trains this reward.
+    DPO's loss pushes it up for chosen attempts and down for rejected ones, so
+    after training it ranks the attempts the way the labels did.
     """
     return beta * (policy_logps - reference_logps)
 

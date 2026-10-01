@@ -178,7 +178,7 @@ def stage_3():
         return policy, metrics
 
     def loss_on_pairs(policy):
-        """The reference DPO loss of `policy` on stage 3's pairs: lower means it agrees with the rater more."""
+        """The reference DPO loss of `policy` on stage 3's pairs: lower means it agrees with the labels more."""
         torch.manual_seed(7)
         pairs = env.collect_pairs(env.Policy(), env.Policy(), 8, ref.sequence_logp)
         return float(ref.dpo_loss(ref.sequence_logp(policy, pairs["chosen_states"], pairs["chosen_actions"]),
@@ -212,17 +212,15 @@ def stage_4():
     theirs, _ = env.train(ref, seed=0)
     need(abs(mine[-1] - theirs[-1]) < 1e-4, f"after 60 iterations J is {mine[-1]:.3f}; the reference reaches "
          f"{theirs[-1]:.3f}")
-    target = env.true_reward(env.optimal_policy(0.1))
     print(f"  your DPO on the multi-step toy (seed 0): J {mine[0]:.3f} after 1 iteration -> "
-          f"{mine[9]:.3f} after 10 -> {mine[-1]:.3f} after 60.   target J(pi*_0.1) {target:.3f}, "
-          f"best possible {env.BEST_J}")
+          f"{mine[9]:.3f} after 10 -> {mine[-1]:.3f} after 60.   best possible {env.BEST_J}")
     learned = env.implicit_rewards(sol, policy, 0.1)
     true = env.QUALITY - env.QUALITY[:, :1]
-    print("  the reward your policy implies, beta * log(pi / pi_ref), relative to 0 searches:")
+    print("  how your policy scores each number of searches, beta * log(pi / pi_ref), relative to 0:")
     for qtype, name in ((env.HARD, "HARD"), (env.EASY, "EASY")):
         print(f"    {name}  learned {[round(float(v), 2) + 0.0 for v in learned[qtype]]}   "
-              f"the rater's r {[round(float(v), 2) + 0.0 for v in true[qtype]]}")
-    print("  Trained only on which attempt won, it has learned roughly how good each choice is.")
+              f"average total {[round(float(v), 2) + 0.0 for v in true[qtype]]}")
+    print("  The same order as the average totals: trained only on which attempt was better, it ranks them.")
 
 
 STAGES = [

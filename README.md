@@ -38,9 +38,9 @@ GRPO and for DPO. The second takes PPO to verl's LLM interface,
  5 SimpleGRPO/   the same agent, no critic: each question
      │           answered 8 times, each answer judged
      ▼           against the others; plus a KL to π_ref
- 6 SimpleDPO/    the same agent, no reward: pairs judged
-     │           by a rater, a logistic loss on each pair,
-     │           π_ref inside it
+ 6 SimpleDPO/    the same agent, no reward: pairs labelled
+     │           by which attempt is better, a logistic loss
+     │           on each pair, π_ref inside it
      └──────────────────────────────────────────────►
 ```
 

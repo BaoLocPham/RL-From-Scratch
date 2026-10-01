@@ -156,5 +156,5 @@ how far each lets the policy go from pi_ref. IPO aims at a fixed margin,
 more: both stay softer. Syncing pi_ref to the actor every step (the recipe's
 config) means every update is taken at logits 0, where the weight on each pair
 is beta * sigmoid(0) = beta / 2 whatever the pair: a policy gradient that knows
-only which response won. SimpleDPO/ shows, on a task with noisy verdicts, where
-these choices start to matter.""")
+only which response won. SimpleDPO/ shows what happens when the verdicts are
+noisy: labelled by a coin-flip outcome, online DPO gets stuck.""")
