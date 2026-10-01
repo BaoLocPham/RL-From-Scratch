@@ -35,12 +35,12 @@ GRPO and for DPO. The second takes PPO to verl's LLM interface,
  4 SimplePPO/    three decisions per question: a critic     ▼
      │           and GAE give each its credit; the     10 Agent0/  back to a toy: GRPO trains the question
      ▼           paper's full PPO, no tokens or masks              writer, ADPO the solver, both just logits
- 5 SimpleGRPO/   the same agent, no critic: each question
-     │           answered 8 times, each answer judged
-     ▼           against the others; plus a KL to π_ref
- 6 SimpleDPO/    the same agent, no reward: pairs labelled
-     │           by which attempt is better, a logistic loss
-     │           on each pair, π_ref inside it
+ 5 SimpleGRPO/   the same agent, no critic: each question   │
+     │           answered 8 times, each answer judged       │
+     ▼           against the others; plus a KL to π_ref     ▼
+ 6 SimpleDPO/    the same agent, no reward: pairs      11 GZero/   no verifier: a hint's effect is the
+     │           labelled by which attempt is better,              reward (GRPO); DPO internalises it
+     │           a logistic loss on each pair, π_ref inside it
      └──────────────────────────────────────────────►
 ```
 
@@ -60,6 +60,7 @@ advantage comes from**:
 | `GRPO/` | the same L^CLIP, imported from `PPO/` | (reward − group mean) / group std | ε, inside the loss |
 | `SimpleDPO/`, `DPO/` | −log σ(β·logits), logits = [log π − log π_ref](chosen) − [log π − log π_ref](rejected) | none: only which of two attempts won | β, through π_ref inside the loss |
 | `Agent0/` | L^CLIP for both agents; ADPO widens ε_high on hard questions | GRPO's; ADPO scales it by s(p̂), how far the label can be trusted | ε; ADPO's ε_high set per question |
+| `GZero/` | L^CLIP for the Proposer; length-normalised DPO for the Generator | the Proposer's: Hint-δ − P_length − P_BLEU, group-relative | ε; β, through π_ref inside DPO |
 
 DPO is the one that leaves the loop: there is no advantage and no θ_old, and
 by default no rollouts while training. The pairs replace all three, and π_ref
@@ -101,7 +102,8 @@ reuses it. Regenerate it with `python SimplePPO/plot_path.py` (about five minute
 Read top to bottom, the modules add one idea each: *which way* → *reuse the
 data* → *but stay close, cheaply* → *credit for several decisions, from a
 critic* → *or from a group, without one* → *or from preferences, without a
-reward* → *all three at LLM scale* → *two agents teaching each other*.
+reward* → *all three at LLM scale* → *two agents teaching each other* → *with
+no verifier at all*.
 
 | # | Module | What you build in `from_scratch/` | Needs |
 |---|---|---|---|
@@ -115,13 +117,14 @@ reward* → *all three at LLM scale* → *two agents teaching each other*.
 | 8 | `GRPO/` | the group-relative advantage at verl's shapes, and the Dr.GRPO flag | **your** PPO exercise, both parts; SimpleGRPO, for the idea |
 | 9 | `DPO/` | verl's online-DPO recipe: the pairs from rewards, `get_batch_logps`, the loss with label smoothing and IPO | SimpleDPO, for the idea |
 | 10 | `Agent0/` | the paper's Eq. 2–8: self-consistency, the Curriculum Agent's reward R_C, the curation band, ADPO's scale and clip | SimpleGRPO, for the idea |
+| 11 | `GZero/` | the paper's Eq. 3–6: Hint-δ, the Proposer's reward, the DPO pairs and the lower-50% filter, length-normalised DPO | Agent0 and SimpleDPO, for the ideas |
 
 The terms each module's logs use are in its README (`VPG/README.md`,
 `TRPO/README.md`, `Surrogates/README.md`, `SimplePPO/README.md`, `SimpleGRPO/README.md`,
-`SimpleDPO/README.md`, `PPO/README.md`, `DPO/from_scratch/README.md`, `Agent0/README.md`).
+`SimpleDPO/README.md`, `PPO/README.md`, `DPO/from_scratch/README.md`, `Agent0/README.md`, `GZero/README.md`).
 
 Each module has a reference implementation (`common.py`, or `vpg.py`,
-`trpo.py`, `surrogates.py`, `simple_ppo.py`, `simple_grpo.py`, `simple_dpo.py` and `agent0.py` on toys), a literal walkthrough
+`trpo.py`, `surrogates.py`, `simple_ppo.py`, `simple_grpo.py`, `simple_dpo.py`, `agent0.py` and `gzero.py` on toys), a literal walkthrough
 (`steps_*.py`), a runnable demonstration (`run_*.py`), and a staged exercise
 under `from_scratch/`. Read them in that order, but solve the exercise without
 opening the reference.
@@ -140,7 +143,7 @@ pip install -r requirements.txt
 ```
 
 `run_trpo.sh`, `run_surrogates.sh`, `run_simple_ppo.sh`, `run_simple_grpo.sh`, `run_simple_dpo.sh`, `run_ppo.sh`,
-`run_grpo.sh`, `run_dpo.sh` and `run_agent0.sh` take the same commands. The demos:
+`run_grpo.sh`, `run_dpo.sh`, `run_agent0.sh` and `run_gzero.sh` take the same commands. The demos:
 
 ```bash
 ./scripts/run_vpg.sh run          # new rollouts every update vs reusing one batch
@@ -148,10 +151,12 @@ pip install -r requirements.txt
 ./scripts/run_surrogates.sh run   # every slot in one loop: the toy's Table 1 (~3 min)
 ./scripts/run_simple_ppo.sh run   # the paper's PPO on three decisions, minus each piece (~1 min)
 ./scripts/run_simple_grpo.sh run  # GRPO on the same agent: Dr.GRPO, group size, no KL, vs PPO (~3 min)
-./scripts/run_simple_dpo.sh run   # DPO on the same agent: beta, online pairs, ranked by outcome, vs GRPO (~2 min)
+./scripts/run_simple_dpo.sh run   # DPO on the same agent: 1 epoch, online pairs, labelled by outcome, vs GRPO (~1 min)
 python SimplePPO/plot_path.py     # the whole path, VPG to PPO, on one toy: PPO/ppo_path.png (~5 min)
 ./scripts/run_ppo.sh run          # Algorithm 1 on the token task, at verl's (batch, response_length) shapes
 ./scripts/run_dpo.sh run          # verl's online DPO on the same token task, and the recipe's knobs
+./scripts/run_agent0.sh run       # Agent0's two agents co-evolving: ADPO vs GRPO, without R_rep
+./scripts/run_gzero.sh run        # G-Zero with no verifier: without the lower-50% filter, without P_BLEU
 ```
 
 Or call the files directly:
@@ -167,6 +172,7 @@ python PPO/steps_ppo.py                python PPO/run_ppo.py                pyth
 python GRPO/steps_grpo.py              python GRPO/run_grpo.py              python GRPO/from_scratch/check.py
 python DPO/steps_dpo.py                python DPO/run_dpo.py                python DPO/from_scratch/check.py
 python Agent0/steps_agent0.py          python Agent0/run_agent0.py          python Agent0/from_scratch/check.py
+python GZero/steps_gzero.py            python GZero/run_gzero.py            python GZero/from_scratch/check.py
 ```
 
 Set `RL_IMPL=scratch` to run any walkthrough against your own implementation
@@ -243,7 +249,8 @@ reference log-probs cover different tokens.
 The LLM-track exercises were designed against the real code in verl and
 verl-recipe, which each module cites by path in its docstrings. Where that code
 and its write-ups disagree, this repo follows the code and says so in a
-comment. `Agent0/` is different: it implements the
-[Agent0 paper](https://arxiv.org/abs/2511.16043)'s equations on a toy where
+comment. `Agent0/` and `GZero/` are different: they implement the
+[Agent0](https://arxiv.org/abs/2511.16043) and
+[G-Zero](https://arxiv.org/abs/2605.09959) papers' equations on toys where
 both agents are small tables of logits, with no model sampling, code sandbox or
-answer parsing (see `Agent0/README.md`).
+answer parsing (see their READMEs).
