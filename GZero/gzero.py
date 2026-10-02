@@ -29,15 +29,19 @@ def hint_delta(generator, q, h, a_hard):
 
         delta(q, h, a_hard) = (1/T) * sum_t [ log pi_G(a_t | q, a_<t) - log pi_G(a_t | q, h, a_<t) ]
 
-    a_hard: (T,) the Generator's unassisted answer to q. It is scored twice:
-    without the hint, then with it. delta > 0 when the hint makes that answer
-    LESS likely -- the hint points somewhere the Generator was not going.
-    Averaged per token (1/T), so a longer answer earns no more. It is a reward,
-    so no gradient flows through it.
+    q:       a query id (int)
+    h:       a hint id (int): 0, 1, 2 for one position, 3 for all of them
+    a_hard:  (T,) token ids, the Generator's unassisted answer to q
+    Returns delta, one float.
+
+    a_hard is scored twice: without the hint, then with it. delta > 0 when the
+    hint makes that answer LESS likely -- the hint points somewhere the
+    Generator was not going. Averaged per token (1/T), so a longer answer earns
+    no more. It is a reward, so no gradient flows through it.
     """
     logp_alone = generator.token_logps(q, a_hard)                 # log pi_G(a_t | q, a_<t), (T,)
     logp_hinted = generator.token_logps(q, a_hard, hint=h)        # log pi_G(a_t | q, h, a_<t), (T,)
-    return float((logp_alone - logp_hinted).mean())               # delta = (1/T) * sum_t [ ... ]
+    return float((logp_alone - logp_hinted).mean())               # delta = (1/T) * sum_t [ ... ]: (T,) -> one float
 
 
 def length_penalty(hint_chars, lam=0.03):
@@ -47,6 +51,8 @@ def length_penalty(hint_chars, lam=0.03):
 
     Free up to 200 characters, then 0.03 per extra 100. A hint that spells out
     everything would move the Generator most; this stops it being free.
+
+    hint_chars: |h|, the hint's length in characters (int). Returns P_length, one float.
     """
     return lam * max(0.0, (hint_chars - 200) / 100)               # P_length
 
@@ -58,10 +64,12 @@ def repetition_penalty(outputs):
 
     The paper clusters the batch's questions by BLEU similarity; C_i is the
     cluster x_i falls in. Here an output is only a (query, hint) id, so a
-    cluster is every copy of the same output. outputs: (B,). Returns (B,).
+    cluster is every copy of the same output.
+
+    outputs: (B,) the batch's Proposer output ids. Returns (B,): each output's P_BLEU.
     """
-    cluster_size = torch.bincount(outputs)[outputs]               # |C_i|: copies of this output in the batch
-    return cluster_size.float() / len(outputs)                    # |C_i| / |B|
+    cluster_size = torch.bincount(outputs)[outputs]               # |C_i|: copies of this output in the batch, (B,)
+    return cluster_size.float() / len(outputs)                    # |C_i| / |B|, (B,)
 
 
 def proposer_reward(delta, p_length, p_bleu):
@@ -69,10 +77,12 @@ def proposer_reward(delta, p_length, p_bleu):
 
         r(q, h) = delta(q, h, a_hard) - P_length - P_BLEU
 
-    All three are (B,). No max(0, .): a hint about something the Generator
-    already knows can earn less than nothing.
+    delta, p_length, p_bleu: each (B,). Returns r, (B,).
+
+    No max(0, .): a hint about something the Generator already knows can earn
+    less than nothing.
     """
-    return delta - p_length - p_bleu                              # r = delta - P_length - P_BLEU
+    return delta - p_length - p_bleu                              # r = delta - P_length - P_BLEU, (B,)
 
 
 # ================================================================ the Generator's data and loss
@@ -84,10 +94,14 @@ def make_pair(generator, q, h):
         chosen   y_w = a_assisted ~ pi_G(. | q, h)      the answer WITH the hint
         rejected y_l = a_hard     ~ pi_G(. | q)         the answer without it
 
-    Also returns delta for this pair (Eq. 3, on the fresh a_hard), for the filter.
+    q: a query id (int). h: a hint id (int). Returns a dict:
+        q, h       the inputs
+        chosen     (T,) token ids, a_assisted
+        rejected   (T,) token ids, a_hard
+        delta      one float: Eq. 3 on this a_hard, for the filter
     """
-    a_assisted = generator.answer(q, hint=h)                      # y_w ~ pi_G(. | q, h)
-    a_hard = generator.answer(q)                                  # y_l ~ pi_G(. | q)
+    a_assisted = generator.answer(q, hint=h)                      # y_w ~ pi_G(. | q, h), (T,)
+    a_hard = generator.answer(q)                                  # y_l ~ pi_G(. | q), (T,)
     return {"q": q, "h": h, "chosen": a_assisted, "rejected": a_hard,
             "delta": hint_delta(generator, q, h, a_hard)}
 
@@ -98,6 +112,8 @@ def lower_half(pairs):
     The paper's reason: on an LLM, a very high-delta pair is far off the
     Generator's distribution and breaks DPO's implicit KL budget. Here it is
     applied as the paper does it; the demo shows what it costs on this toy.
+
+    pairs: a list of make_pair dicts. Returns a list: the half with the lowest delta.
     """
     ranked = sorted(pairs, key=lambda pair: pair["delta"])        # lowest delta first
     return ranked[:len(pairs) // 2]                                # the lower 50%
@@ -109,14 +125,18 @@ def dpo_loss_ln(logp_w, ref_logp_w, logp_l, ref_logp_l, len_w, len_l, beta=2.0):
         L = -log sigmoid( beta * (r_bar(x, y_w) - r_bar(x, y_l)) ),
         r_bar(x, y) = (1/|y|) * log( pi_theta(y | x) / pi_ref(y | x) ),     beta = 2.0
 
-    Inputs are (n,): each answer's summed log-probability under the Generator
-    being trained (logp_*) and under pi_ref, the Generator frozen at the start
-    of the round (ref_logp_*), and each answer's length |y|. The prompt x is the
-    query ALONE: no hint.
+    logp_w, logp_l:          (n,) each answer's summed log-probability under the
+                             Generator being trained, log pi_theta(y | x)
+    ref_logp_w, ref_logp_l:  (n,) the same under pi_ref, the Generator frozen at
+                             the start of the round, log pi_ref(y | x)
+    len_w, len_l:            (n,) each answer's length |y|
+    Returns the loss, a scalar (): the mean over the n pairs.
+
+    The prompt x is the query ALONE: no hint.
     """
-    r_bar_w = (logp_w - ref_logp_w) / len_w                       # r_bar(x, y_w): per-token log-ratio of the chosen
-    r_bar_l = (logp_l - ref_logp_l) / len_l                       # r_bar(x, y_l): the same for the rejected
-    return -F.logsigmoid(beta * (r_bar_w - r_bar_l)).mean()       # -log sigmoid(beta * (r_bar_w - r_bar_l))
+    r_bar_w = (logp_w - ref_logp_w) / len_w                       # r_bar(x, y_w): per-token log-ratio of the chosen, (n,)
+    r_bar_l = (logp_l - ref_logp_l) / len_l                       # r_bar(x, y_l): the same for the rejected, (n,)
+    return -F.logsigmoid(beta * (r_bar_w - r_bar_l)).mean()       # -log sigmoid(beta * (r_bar_w - r_bar_l)), mean over the n pairs: ()
 
 
 # ================================================================ GRPO, for the Proposer
@@ -131,7 +151,7 @@ def group_advantage(rewards, eps=1e-6):
     """
     mean = rewards.mean(dim=1, keepdim=True)                      # mean(r_group): (groups, 1)
     std = rewards.std(dim=1, keepdim=True)                        # std(r_group), sample std: (groups, 1)
-    return (rewards - mean) / (std + eps)                         # A_i
+    return (rewards - mean) / (std + eps)                         # A_i, (groups, K)
 
 
 def clipped_loss(logp, old_logp, advantages, eps=0.2):
@@ -139,11 +159,14 @@ def clipped_loss(logp, old_logp, advantages, eps=0.2):
 
         L = -(1/K) * sum_i min( r_i * A_i, clip(r_i, 1 - eps, 1 + eps) * A_i ),    r_i = pi_P / pi_P_old
 
-    All inputs are (n,).
+    logp:        (n,) log pi_P of each output, under the Proposer being trained
+    old_logp:    (n,) log pi_P_old, the same before this update (no gradient)
+    advantages:  (n,) A_i
+    Returns the loss, a scalar ().
     """
-    ratio = torch.exp(logp - old_logp)                            # r_i = pi_P / pi_P_old
-    clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)            # clip(r_i, 1 - eps, 1 + eps)
-    return -torch.min(ratio * advantages, clipped * advantages).mean()   # -(1/K) sum_i min(...)
+    ratio = torch.exp(logp - old_logp)                            # r_i = pi_P / pi_P_old, (n,)
+    clipped = torch.clamp(ratio, 1.0 - eps, 1.0 + eps)            # clip(r_i, 1 - eps, 1 + eps), (n,)
+    return -torch.min(ratio * advantages, clipped * advantages).mean()   # -(1/K) sum_i min(...), mean: ()
 
 
 # ================================================================ the loop
@@ -151,31 +174,32 @@ def clipped_loss(logp, old_logp, advantages, eps=0.2):
 
 @torch.no_grad()
 def score_outputs(outputs, generator, use_bleu=True):
-    """Phase 1's reward for a batch of Proposer outputs: every term of Eq. 5, each (B,).
+    """Phase 1's reward for a batch of Proposer outputs: every term of Eq. 5.
 
-    For each (q, h), the frozen Generator answers q once without the hint, and
-    hint_delta scores that answer with and without h.
+    outputs: (B,) Proposer output ids. Returns a dict of four (B,) tensors:
+    delta, p_length, p_bleu and r. For each (q, h), the frozen Generator answers
+    q once without the hint, and hint_delta scores that answer with and without h.
     """
     delta = torch.tensor([hint_delta(generator, query_of(o), hint_of(o), generator.answer(query_of(o)))
-                          for o in outputs.tolist()])                              # delta(q, h, a_hard)   (Eq. 3)
-    p_length = torch.tensor([length_penalty(HINT_CHARS[hint_of(o)]) for o in outputs.tolist()])   # (Eq. 4)
-    p_bleu = repetition_penalty(outputs) if use_bleu else torch.zeros(len(outputs))     # P_BLEU
+                          for o in outputs.tolist()])                              # delta(q, h, a_hard), (B,)   (Eq. 3)
+    p_length = torch.tensor([length_penalty(HINT_CHARS[hint_of(o)]) for o in outputs.tolist()])   # P_length, (B,)   (Eq. 4)
+    p_bleu = repetition_penalty(outputs) if use_bleu else torch.zeros(len(outputs))     # P_BLEU, (B,)
     return {"delta": delta, "p_length": p_length, "p_bleu": p_bleu,
-            "r": proposer_reward(delta, p_length, p_bleu)}                             # r (Eq. 5)
+            "r": proposer_reward(delta, p_length, p_bleu)}                             # r, (B,)   (Eq. 5)
 
 
 def train_proposer(proposer, generator, optimizer, steps=30, groups=4, k=16, epochs=2, use_bleu=True):
     """Phase 1: GRPO on the Proposer's 24 logits. The Generator is frozen.
 
-    Each step writes 4 groups of K = 16 outputs (the paper's K), and GRPO
-    compares each output with the others in its group.
+    Each step writes 4 groups of K = 16 outputs (the paper's K), so a batch of
+    B = 64, and GRPO compares each output with the others in its group.
     """
     for _ in range(steps):
         with torch.no_grad():
             outputs = proposer.write(groups * k)                              # (q, h) ~ pi_P, (B,)
             r = score_outputs(outputs, generator, use_bleu)["r"]              # r(q, h), (B,)
-            advantages = group_advantage(r.view(groups, k)).view(-1)          # A_i within each group of K
-            old_logp = proposer.log_prob(outputs)                             # log pi_P_old, frozen
+            advantages = group_advantage(r.view(groups, k)).view(-1)          # A_i within each group of K: (groups, K) -> (B,)
+            old_logp = proposer.log_prob(outputs)                             # log pi_P_old, frozen, (B,)
         for _ in range(epochs):
             loss = clipped_loss(proposer.log_prob(outputs), old_logp, advantages)
             optimizer.zero_grad()
@@ -185,7 +209,10 @@ def train_proposer(proposer, generator, optimizer, steps=30, groups=4, k=16, epo
 
 @torch.no_grad()
 def collect_pairs(proposer, generator, n=200, use_filter=True):
-    """Phase 2's data: N (q, h) from the frozen Proposer, a DPO pair for each, then the lower-50% filter."""
+    """Phase 2's data: N (q, h) from the frozen Proposer, a DPO pair for each, then the lower-50% filter.
+
+    Returns a list of make_pair dicts: N // 2 of them with the filter, N without.
+    """
     pairs = [make_pair(generator, query_of(o), hint_of(o)) for o in proposer.write(n).tolist()]
     return lower_half(pairs) if use_filter else pairs
 
@@ -193,6 +220,7 @@ def collect_pairs(proposer, generator, n=200, use_filter=True):
 def train_generator(generator, pairs, steps=50, batch=8, beta=2.0, lr=2.0):
     """Phase 2: length-normalised DPO on the Generator's unassisted table. The Proposer is frozen.
 
+    pairs: a list of make_pair dicts; each step draws `batch` of them.
     pi_ref is a frozen copy of the Generator from the start of the round. The
     paper runs 50 steps with batch size 8; so does this.
     """
@@ -203,13 +231,13 @@ def train_generator(generator, pairs, steps=50, batch=8, beta=2.0, lr=2.0):
     optimizer = torch.optim.SGD(generator.parameters(), lr=lr)
     for _ in range(steps):
         chosen = [pairs[i] for i in torch.randint(len(pairs), (batch,)).tolist()]
-        logp_w = torch.stack([generator.token_logps(p["q"], p["chosen"]).sum() for p in chosen])      # log pi_theta(y_w | q)
-        logp_l = torch.stack([generator.token_logps(p["q"], p["rejected"]).sum() for p in chosen])    # log pi_theta(y_l | q)
+        logp_w = torch.stack([generator.token_logps(p["q"], p["chosen"]).sum() for p in chosen])      # log pi_theta(y_w | q), (batch,)
+        logp_l = torch.stack([generator.token_logps(p["q"], p["rejected"]).sum() for p in chosen])    # log pi_theta(y_l | q), (batch,)
         with torch.no_grad():
-            ref_w = torch.stack([reference.token_logps(p["q"], p["chosen"]).sum() for p in chosen])   # log pi_ref(y_w | q)
-            ref_l = torch.stack([reference.token_logps(p["q"], p["rejected"]).sum() for p in chosen])  # log pi_ref(y_l | q)
-        length = torch.full((batch,), float(T))                                                         # |y| = 3 tokens
-        loss = dpo_loss_ln(logp_w, ref_w, logp_l, ref_l, length, length, beta)                          # Eq. 6
+            ref_w = torch.stack([reference.token_logps(p["q"], p["chosen"]).sum() for p in chosen])   # log pi_ref(y_w | q), (batch,)
+            ref_l = torch.stack([reference.token_logps(p["q"], p["rejected"]).sum() for p in chosen])  # log pi_ref(y_l | q), (batch,)
+        length = torch.full((batch,), float(T))                                                         # |y| = 3 tokens, (batch,)
+        loss = dpo_loss_ln(logp_w, ref_w, logp_l, ref_l, length, length, beta)                          # Eq. 6: the loss, ()
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
@@ -218,7 +246,14 @@ def train_generator(generator, pairs, steps=50, batch=8, beta=2.0, lr=2.0):
 def gzero(seed=0, rounds=2, use_filter=True, use_bleu=True, report=None):
     """The whole loop: Phase 1 then Phase 2, `rounds` times (the paper's 2).
 
-    Returns the trained (proposer, generator) and one record per round.
+    Returns (proposer, generator, history): the trained agents, and one record
+    per round in history, a dict of
+        by_query       6 floats: pi_P's p(query 0..5), summed over hints
+        by_hint        4 floats: pi_P's p(hint 0..3), summed over queries
+        top_output     one float: pi_P's largest p on any one (query, hint)
+        pairs          an int: how many DPO pairs Phase 2 used
+        p_good_before  (6, 3): pi_G's unassisted p(good token), per query and position, before DPO
+        p_good         (6, 3): the same, after DPO
     `report(round, record)`, if given, is called after each round.
     """
     torch.manual_seed(seed)
