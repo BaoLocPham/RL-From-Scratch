@@ -65,34 +65,80 @@ print(f"""
 
 # ---------------------------------------------------------------- step 1
 banner("STEP 1  Hint-delta: how much does the hint move the Generator's OWN answer? (Eq. 3)")
-print("""      delta(q, h, a_hard) = (1/T) * sum_t [ log pi_G(a_t | q) - log pi_G(a_t | q, h) ]
+q, h = 1, 1
+good = int(env.GOOD[q, h])
+print(f"""    delta(q, h) = (1/T) sum_t log pi_G(a_t | q, a_<t)  -  (1/T) sum_t log pi_G(a_t | q, h, a_<t)
 
-  a_hard is the Generator's unassisted answer. Score it twice: without the hint, then with
-  it. Query 1, two different hints:
+  q = query {q} (good answer {env.GOOD[q].tolist()}; position {h} is its blind spot)
+  h = the hint on position {h}: "position {h} is token {good}"
 """)
+
+# Step 1: one unaided answer. Step 2 reseeds, so the steps after this one are unaffected.
 torch.manual_seed(0)
-for h in (1, 0):
-    a_hard = generator.answer(1)
-    alone, hinted = generator.token_logps(1, a_hard), generator.token_logps(1, a_hard, hint=h)
-    delta = impl.hint_delta(generator, 1, h, a_hard)
-    print(f"  hint on {HINT_NAME[h]} ({'the blind spot' if h in env.BLIND[1] else 'a known position'}), a_hard = {a_hard.tolist()}:")
-    print(f"    log pi_G(a_t | q)    {[f(x) for x in alone]}")
-    print(f"    log pi_G(a_t | q, h) {[f(x) for x in hinted]}")
-    terms = alone - hinted
-    print(f"    delta = (1/3) * ({' + '.join(f'({f(x)})' for x in terms)}) = {f(delta)}\n")
-print("""  The blind-spot hint makes the Generator's own wrong token less likely: delta > 0. The
-  hint on a position it already gets right makes its (right) token MORE likely: delta < 0.
-  Positions the hint does not name cancel exactly.
+a_hard = generator.answer(q)
+print(f"""  Step 1 -- sample the unaided answer
+    pi_G sees only q and writes a_hard = {a_hard.tolist()}  ->  T = {env.T} tokens.
 
-  On ONE answer delta can be negative; averaged over the Generator's answers it is the KL
-  divergence from pi_G(. | q) to pi_G(. | q, h), never negative -- large where the hint
-  changes the answer a lot:
+  Step 2 -- score each token twice
+    Nothing is sampled again: the same {env.T} tokens are re-read, once without h, once with it.
+    To read p(a_t): take the row of logits at position t, softmax it, and look up the token
+    that was written. Position {h}, where a_{h} = {int(a_hard[h])}:""")
+for name, row in (("no hint  ", generator.logits(q)[h]), ("with hint", generator.logits(q, hint=h)[h])):
+    p = torch.softmax(row.detach(), -1)
+    print(f"      {name}  logits {[f(x, 1) for x in row]}  ->  p [{', '.join(f'{float(x):.2f}' for x in p)}]"
+          f"  ->  p({int(a_hard[h])}) = {float(p[a_hard[h]]):.2f}")
+print(f"{' ' * (25 + 5 * good)}^ +kappa on the good token {good}\n")
+
+alone = generator.token_logps(q, a_hard).detach()             # log pi_G(a_t | q, a_<t), (T,)
+hinted = generator.token_logps(q, a_hard, hint=h).detach()    # log pi_G(a_t | q, h, a_<t), (T,)
+row = "    {:>1}   {:>3}   {:<5}   {:>10}   {:>7}   {:>12}   {:>7}   {:>10}"
+print(row.format("t", "a_t", "a_<t", "P(no hint)", "log", "P(with hint)", "log", "difference"))
+for t in range(env.T):
+    print(row.format(t, int(a_hard[t]), " ".join(str(x) for x in a_hard[:t].tolist()) or "-",
+                     f"{float(alone[t].exp()):.2f}", f"{f(alone[t]):.3f}",
+                     f"{float(hinted[t].exp()):.2f}", f"{f(hinted[t]):.3f}", f"{f(alone[t] - hinted[t]):.3f}"))
+print(row.format("", "", "", "sum", f"{f(alone.sum()):.3f}", "sum", f"{f(hinted.sum()):.3f}", "").rstrip())
+print("""    (The toy has one row of logits per position, so a_<t does not change the row. In an LLM it
+     does: one forward pass over q + a_hard, and position t sees only the tokens before it.)
 """)
+
+delta = impl.hint_delta(generator, q, h, a_hard)
+print(f"""  Step 3 -- average and subtract
+    delta = ({f(alone.sum())} / {env.T}) - ({f(hinted.sum())} / {env.T}) = {f(alone.mean())} - ({f(hinted.mean())}) = {f(delta)}
+
+  Reading it: all of delta comes from position {h}, the blind spot. Once pi_G reads "position {h}
+  is token {good}", its own token {int(a_hard[h])} there looks much less likely. The hint names no other
+  position, so those rows are unchanged and their difference is exactly 0.
+  In hint_delta (stage 1), each log column is one call to generator.token_logps, without h
+  and with it, and delta is the mean of their difference.
+
+  Same question, same answer {a_hard.tolist()}, each of the four hints:
+
+    hint on         delta    what it means""")
+for hint in range(env.HINTS):
+    with_hint = generator.token_logps(q, a_hard, hint=hint).detach()    # the "log" column with this hint
+    if hint == env.ALL:
+        terms = [f(x) for x in alone - with_hint]                        # the "difference" column
+        signed = str(terms[0]) + "".join(f" {'-' if x < 0 else '+'} {abs(x)}" for x in terms[1:])
+        meaning = f"({signed}) / {env.T}: the blind spot, less two known positions"
+    else:
+        kind = "the blind spot" if hint in env.BLIND[q] else "a known position"
+        way = "less" if with_hint[hint] < alone[hint] else "MORE"
+        meaning = (f"{kind}: its own token {int(a_hard[hint])} gets {way} likely "
+                   f"({float(alone[hint].exp()):.2f} -> {float(with_hint[hint].exp()):.2f})")
+    print(f"    {HINT_NAME[hint]:<14}{f(impl.hint_delta(generator, q, hint, a_hard)):>7.3f}    {meaning}")
+
+print("""
+  The catch: delta uses ONE sample of a_hard, so one pair's delta is noisy and can be negative.
+  Averaged over the Generator's own answers it is KL(pi_G(. | q) || pi_G(. | q, h)), never
+  negative, and largest where the hint names blind spots:
+
+    query, hint         blind spots named   average delta""")
 for q, h in ((1, 1), (1, 0), (5, 3), (0, 3)):
     p_alone, p_hinted = torch.softmax(generator.logits(q), -1), torch.softmax(generator.logits(q, hint=h), -1)
     kl = (p_alone * (p_alone.log() - p_hinted.log())).sum(-1).mean()
-    n = len(env.BLIND[q])
-    print(f"    query {q}, hint on {HINT_NAME[h]:<13}  average delta = {f(kl)}   (query {q} has {n} blind spot{'' if n == 1 else 's'})")
+    named = len(set(env.hint_positions(h)) & set(env.BLIND[q]))
+    print(f"    {f'{q}, {HINT_NAME[h]}':<20}{named:<20}{f(kl):.3f}")
 
 # ---------------------------------------------------------------- step 2
 banner("STEP 2  the Proposer's reward (Eq. 4-5)")
